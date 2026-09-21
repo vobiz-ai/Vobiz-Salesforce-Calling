@@ -1,0 +1,38 @@
+<!--
+  Salesforce Call Center definition for Vobiz Calling.
+
+  Import this once at Setup → Call Centers → Import, then edit the record to
+  point at your own adapter URL. Salesforce stores only this URL — the panel
+  itself is hosted by you — so this file is a starting point, not a deployment.
+
+  REPLACE THE ADAPTER URL BELOW before importing. Its parameters are:
+
+    ?org=        REQUIRED. Your Salesforce My Domain host. Open CTI is served
+                 per-org and there is no CDN copy, so the panel has to be told
+                 where to load the toolkit from.
+    &agentId=    REQUIRED. Which agent identity this call centre registers as.
+                 Every agent needs a different value, or calls ring the wrong
+                 person. Create a second Call Center per agent.
+    &backendUrl= Optional. Defaults to wherever the panel was served from,
+                 which is correct when the calling backend serves it.
+    &apiVersion= Optional. Open CTI API version, default 64.0.
+
+  Note that an ampersand is written &amp; inside XML. In the Salesforce UI
+  field, type a plain &.
+-->
+<callCenter>
+  <section sortOrder="0" name="reqGeneralInfo" label="General Information">
+    <item sortOrder="0" name="reqInternalName" label="InternalName">VobizCalling</item>
+    <item sortOrder="1" name="reqDisplayName" label="Display Name">Vobiz Calling</item>
+    <item sortOrder="2" name="reqAdapterUrl" label="CTI Adapter URL">https://calling.example.com/salesforce/softphone.html?org=https://your-org.my.salesforce.com&amp;agentId=agent-one</item>
+    <item sortOrder="3" name="reqUseApi" label="Use CTI API">true</item>
+    <item sortOrder="4" name="reqSoftphoneHeight" label="Softphone Height">600</item>
+    <item sortOrder="5" name="reqSoftphoneWidth" label="Softphone Width">400</item>
+    <item sortOrder="6" name="reqSalesforceCompatibilityMode" label="Salesforce Compatibility Mode">Lightning</item>
+  </section>
+  <section sortOrder="1" name="reqDialingOptions" label="Dialing Options">
+    <item sortOrder="0" name="reqOutsidePrefix" label="Outside Prefix"></item>
+    <item sortOrder="1" name="reqLongDistPrefix" label="Long Distance Prefix"></item>
+    <item sortOrder="2" name="reqInternationalPrefix" label="International Prefix"></item>
+  </section>
+</callCenter>

@@ -1,0 +1,13 @@
+# Local environment — never commit credentials
+.env
+.env.*
+!.env.example
+
+# Dependencies (this app has none at runtime; tooling may add them)
+node_modules/
+
+# Editor / OS
+.DS_Store
+.idea/
+.vscode/
+*.log

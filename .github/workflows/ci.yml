@@ -1,0 +1,50 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+    branches: [main]
+
+# There is no build and no test suite — this is four static files and a
+# vendored library. So CI checks the things that do break silently: code that
+# stops parsing, documentation links that rot, and a credential reaching a
+# public repository.
+jobs:
+  check:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22.x
+
+      - name: JavaScript parses
+        run: |
+          set -e
+          node --check app/opencti-host.js
+          node --check app/softphone.js
+          node --check tools/port-from-freshsales.mjs
+          node --check tools/check-docs.mjs
+
+      - name: Documentation links resolve
+        run: node tools/check-docs.mjs
+
+      - name: Call Center definition is well-formed XML
+        run: python3 -c "import xml.dom.minidom,sys; xml.dom.minidom.parse('call-center/call-center-definition.xml'); print('ok')"
+
+      - name: No committed credentials
+        run: |
+          set -e
+          if [ -f .env ] || [ -f app/.env ]; then echo "a .env is committed"; exit 1; fi
+          # The panel must never gain an Auth Token, and the toolkit host check
+          # must not be removed — both are the defects this family keeps
+          # reproducing. See SECURITY.md.
+          if grep -rInE 'VOBIZ_AUTH_TOKEN|authToken *[:=] *["'"'"'][A-Za-z0-9]{8,}' app/ ; then
+            echo "an auth token must never be in the panel"; exit 1
+          fi
+          if ! grep -q 'SALESFORCE_HOST' app/opencti-host.js ; then
+            echo "the ?org= host check is gone — see SECURITY.md"; exit 1
+          fi
+          echo "clean"
