@@ -84,10 +84,9 @@ sends the SIP INVITE itself, so the browser is the **A leg**, and your `/answer`
 handler decides what happens next — see [`/answer`](#getpost-answer).
 
 The previous design — backend originates to the customer over the REST API, then
-bridges the browser in with `<Dial><User>` — is dead. Routing *into* a registered
-WebRTC endpoint is broken platform-side: Vobiz builds an unparseable gateway URI
-and drops its own INVITE. Verified across other accounts and Vobiz's own SDK; see
-[ISSUES.md](../ISSUES.md).
+bridges the browser in with `<Dial><User>` — does not work: a call cannot be
+delivered into a registered WebRTC endpoint. The browser places every call, and
+your `/answer` handler decides what happens next.
 
 Keep the route if you want a server-originated fallback (for ringing an agent's
 mobile, say). Its shape is unchanged:
@@ -276,17 +275,14 @@ POST /api/v1/Account/{auth_id}/Call/
   answer_method=GET
 ```
 
-> **Why not `<Dial><Number>`?** It is the documented approach and it is what
-> this contract used to specify. It was changed because Vobiz's WebRTC-to-PSTN
-> bridge **loses the media intermittently**: measured on a live account, three
-> of five browser-bridged outbound calls carried 98–99% packet loss on the phone
-> leg while the browser's own leg stayed clean, and three control calls placed
-> by the REST API with no browser involved were clean. Signalling completes
-> either way, so a failed call still rings, answers and bills with nobody able
-> to hear anything. `<Dial>` exposes no attribute that controls this.
+> **Why not `<Dial><Number>`?** Bridging a browser leg directly to a phone leg
+> is unreliable for media — the call rings, answers and bills, and one side
+> hears nothing, because signalling succeeds whether or not audio does. A
+> conference establishes each leg separately, which is the arrangement that
+> carries audio consistently.
 >
-> Keep your `<Dial>` path behind a flag if you want a way back — the defect is
-> open with Vobiz and may be fixed upstream.
+> If you implement the `<Dial>` path anyway, keep it behind a flag so you can
+> switch back without a deploy.
 
 **Caller ID.** The A leg's own caller ID is a SIP username, which is not a
 dialable CLI. Use, in order: the `X-VH-Caller-ID` header the panel sends (the
@@ -400,4 +396,4 @@ A backend implementing this contract must therefore:
 - [ ] **Store Auth Tokens encrypted at rest**, and never log them.
 - [ ] **Serve over HTTPS** with a stable hostname.
 
-If you are adapting an internal prototype, assume it does none of these.
+If you are adapting a prototype, assume it does none of these.

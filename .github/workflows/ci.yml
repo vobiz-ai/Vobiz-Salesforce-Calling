@@ -25,7 +25,6 @@ jobs:
           set -e
           node --check app/opencti-host.js
           node --check app/softphone.js
-          node --check tools/port-from-freshsales.mjs
           node --check tools/check-docs.mjs
 
       - name: Documentation links resolve

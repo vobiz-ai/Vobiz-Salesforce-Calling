@@ -36,7 +36,7 @@ Every one of these takes a `callback` and returns nothing, so
 
 ## The host adapter
 
-`app/softphone.js` is the Freshsales panel, ported across almost unchanged. It
+`app/softphone.js` is the panel itself. It
 expects a Freshworks-shaped `client` object; `app/opencti-host.js` supplies that
 shape backed by Open CTI.
 
@@ -48,7 +48,7 @@ shape backed by Open CTI.
                   │  client.events.on / client.interface.trigger
   ┌───────────────▼─────────────────────────┐
   │ opencti-host.js — the adapter           │
-  │ (the only Salesforce-specific layer)    │
+  │ (the Salesforce-specific layer)         │
   └───────────────┬─────────────────────────┘
                   │  sforce.opencti.*
   ┌───────────────▼─────────────────────────┐
@@ -56,11 +56,11 @@ shape backed by Open CTI.
   └─────────────────────────────────────────┘
 ```
 
-This exists so the two integrations do not drift. The conference bridge, the ICE
-gathering cap, the placeholder-password gate and the caller release on hangup
-are telephony, not CRM — none of it should be written twice. A fix made in the
-Freshsales panel reaches this one by re-running
-[`tools/port-from-freshsales.mjs`](../tools/port-from-freshsales.mjs).
+The split is deliberate. Everything below the adapter — the conference bridge,
+the ICE gathering cap, SIP registration, releasing the caller's leg on hangup —
+is telephony and knows nothing about Salesforce. Everything Salesforce-specific
+lives in the adapter and in the CRM functions at the bottom of the panel, which
+is where a change for this platform belongs.
 
 ## An outbound call, end to end
 
@@ -79,13 +79,11 @@ Two things about this are deliberate.
 a call to a registered WebRTC endpoint — it answers `Endpoint Not Registered`
 and never dials anyone.
 
-**The bridge is a conference, not `<Dial><Number>`.** `<Dial>` is the documented
-way, and it loses the media intermittently: in measurement, three of five
-browser-bridged outbound calls carried 98–99% packet loss on the phone leg while
-the browser's own leg stayed clean, and control calls placed by the REST API
-with no browser involved were clean every time. Signalling completes either way,
-so a failed call still rings, answers and bills with nobody able to hear
-anything.
+**The bridge is a conference, not `<Dial><Number>`.** Bridging a browser leg
+directly to a phone leg is unreliable for media: the call connects and bills,
+and one side hears nothing. Establishing each leg separately into a conference
+room is the path that carries audio consistently, so that is what the backend
+does.
 
 ## An inbound call
 

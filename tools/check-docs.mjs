@@ -53,7 +53,17 @@ for (const file of markdownFiles(ROOT)) {
   const body = readFileSync(file, "utf8");
   for (const m of body.matchAll(/\]\(([^)\s]+)\)/g)) {
     const target = m[1];
-    if (/^(https?:|mailto:|#)/.test(target)) continue;
+    if (/^(https?:|mailto:)/.test(target)) continue;
+
+    // A same-page anchor: the Contents list at the top of the README is exactly
+    // the thing that goes stale when a heading is renamed.
+    if (target.startsWith("#")) {
+      if (!anchorCache.has(file)) anchorCache.set(file, anchorsOf(file));
+      if (!anchorCache.get(file).has(target.slice(1))) {
+        failures.push(`${relative(ROOT, file)} -> ${target} (no such heading on this page)`);
+      }
+      continue;
+    }
 
     const [path, anchor] = target.split("#");
     const resolved = normalize(join(dirname(file), path));

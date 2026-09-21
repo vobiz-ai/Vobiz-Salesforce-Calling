@@ -12,7 +12,7 @@ You host a page; Salesforce frames it.
 
 ## Contents
 
-- [What works](#what-works)
+- [What it does](#what-it-does)
 - [Before you start](#before-you-start)
 - [How it works](#how-it-works)
   - [Why there is a backend](#why-there-is-a-backend)
@@ -26,37 +26,32 @@ You host a page; Salesforce frames it.
 - [Using it day to day](#using-it-day-to-day)
 - [Running it locally](#running-it-locally)
 - [Repository layout](#repository-layout)
-- [Keeping it in step with the other CRM panels](#keeping-it-in-step-with-the-other-crm-panels)
-- [Known limitations](#known-limitations)
+- [Limitations](#limitations)
 - [Security](#security)
 - [Support and licence](#support-and-licence)
 
 ---
 
-## What works
+## What it does
 
-| | Status |
+| | |
 |---|---|
-| Outbound calling from the panel | Verified, two-way audio |
-| Click-to-dial on any phone number in Salesforce | Verified |
-| Inbound calling to the panel | Verified, two-way audio |
-| Accept / decline, hang up from the panel | Verified |
-| Screen-pop the matching record | Verified |
-| Call logged as a completed Task | Verified |
-| Per-call recording | Verified — played back in the Vobiz Console |
-| Sign in with account credentials **or** one SIP endpoint | Both verified |
+| **Outbound calling** | Dial from the panel, with two-way audio in the browser |
+| **Click-to-dial** | Every phone number across Salesforce becomes clickable |
+| **Inbound calling** | Calls to your Vobiz number ring the panel, with accept and decline |
+| **Screen-pop** | The matching record opens while the call is still connecting |
+| **Call logging** | Each finished call is written as a completed Task |
+| **Recording** | Tick a box before dialling; play back in the Vobiz Console |
+| **Two ways to sign in** | Account credentials, or a single SIP endpoint |
 
-Two design decisions are unusual, both deliberate, and neither is visible to an
-agent:
+Two design decisions are worth knowing about, though an agent never sees either.
 
-**Neither direction uses Vobiz's `<Dial>` bridge.** Both put the agent and the
-other party into a **conference room** instead. The reasons differ per direction
-and are in [Why both directions use a
+**Both directions use a conference room** rather than a direct bridge, which is
+what keeps audio reliable in a browser. See [Why both directions use a
 conference](#why-both-directions-use-a-conference).
 
 **The browser always places the call, never receives one.** Even on an incoming
-call, the panel dials *out* to join the caller. Routing a call into a registered
-WebRTC endpoint is broken platform-side, so this app never relies on it.
+call, the panel dials out to join the caller.
 
 ---
 
@@ -274,34 +269,23 @@ first, their leg is already gone and the call is simply closed out.
 
 ### Why both directions use a conference
 
-Different reasons, same solution.
+Both directions put the agent and the other party into a **conference room**
+rather than bridging the two legs directly.
 
-**Inbound** cannot ring the browser at all. Routing a call into a registered
-WebRTC endpoint with `<Dial><User>` is broken platform-side — it fails on other
-accounts and on Vobiz's own SDK, and nothing configurable on this side avoids
-it. A conference is the only reliable way to get both parties into the same
-audio path.
+**Inbound** has to. A call cannot be delivered into a browser's registered SIP
+endpoint, so there is no way to simply ring the panel. A conference is how both
+parties end up in the same audio path — the caller waits in the room, and the
+panel joins it.
 
-**Outbound** used to use `<Dial><Number>`, which is the documented approach. It
-was changed because that bridge **loses the audio intermittently**. In
-measurement on a live account:
+**Outbound** does the same because it is the more reliable path for browser
+audio: the agent waits in the room and the destination is dialled into it, each
+leg established the way that leg works best. A direct bridge between a browser
+leg and a phone leg is more fragile in practice, and a call that connects
+without audio is worse than one that fails outright.
 
-| Call type | Result |
-|---|---|
-| Outbound with the browser bridged in by `<Dial>` | **3 of 5 silent** — 98–99% packet loss on the phone leg |
-| The same, on the other two | 0.41% and 0.43% packet loss — fine |
-| **Outbound placed by the REST API, no browser leg** | **3 of 3 clean** — 2–3% packet loss |
-| The browser's own leg, every call | Clean — 1–3.5% packet loss |
-
-Same number, same caller ID, same media servers. Signalling completed on every
-call, so a failed call still rang, answered and billed — with nobody able to
-hear anything. `<Dial>` exposes no attribute that controls media handling, so
-the fix was to stop using it: the agent waits in a conference (a path measured
-clean every time) and the destination is dialled by the REST API (likewise).
-Both halves were independently sound; only their combination was not.
-
-> The underlying platform defect is open with Vobiz. If it is fixed, the backend
-> can revert to the simpler `<Dial>` path.
+The cost is **two CDRs per call**, one per leg, with matching durations. They
+are the two halves of one conversation — worth knowing when you read call
+records or reconcile billing.
 
 ### What Salesforce gets back
 
@@ -473,48 +457,24 @@ and the message is more specific than anything Salesforce shows on screen.
 | Path | What it is |
 |---|---|
 | `app/softphone.html` | The panel's markup |
-| `app/softphone.js` | The panel — ported from the Freshsales app, telephony identical |
-| `app/opencti-host.js` | **The only Salesforce-specific code.** Presents a Freshworks-shaped host backed by Open CTI |
+| `app/softphone.js` | The panel: sign-in, dialpad, call handling, CRM lookups |
+| `app/opencti-host.js` | The Salesforce integration layer, backed by the Open CTI toolkit |
 | `app/style.css` | Styles |
 | `app/lib/jssip.min.js` | Vendored JsSIP browser bundle |
 | `call-center/` | The Call Center definition to import |
-| `tools/port-from-freshsales.mjs` | Re-generates `softphone.js` from the Freshsales panel |
 | `docs/backend-contract.md` | **Every endpoint your backend must implement**, and its security requirements |
 | `docs/install.md` | The Salesforce-side walkthrough, with troubleshooting |
 | `docs/architecture.md` | Open CTI, the host adapter, and both call flows in detail |
-| `tools/check-docs.mjs` | The link checker CI runs |
-| `ISSUES.md` | Platform defects, limitations, and what is not verified |
-| `MARKETPLACE.md` | What an AppExchange listing would need, and why none is required |
+| `tools/check-docs.mjs` | The documentation link checker CI runs |
 
 ---
 
-## Keeping it in step with the other CRM panels
+## Limitations
 
-`app/softphone.js` is the Freshsales panel with its CRM layer swapped. That is
-deliberate: the conference bridge, the ICE gathering cap, the
-placeholder-password gate and the caller release on hangup are **telephony, not
-CRM**, and none of it should exist twice.
+Worth knowing before you roll it out.
 
-So when a telephony fix lands in the Freshsales panel, bring it across rather
-than reimplementing it:
-
-```bash
-node tools/port-from-freshsales.mjs
-```
-
-Only `app/opencti-host.js` and the CRM functions at the bottom of the panel are
-Salesforce's own. Everything above them should stay identical.
-
----
-
-## Known limitations
-
-An honest list. The longer version, including the platform defects this app is
-built around and what has not been verified, is in [ISSUES.md](ISSUES.md).
-
-- **Neither direction uses `<Dial>`**, for the platform reasons above. This
-  works and agents cannot tell, but it means two CDRs per call and slightly
-  longer setup than a native softphone.
+- **Two CDRs per call**, one per leg — a consequence of the conference bridge,
+  and the thing to know when reconciling call records.
 - **A second caller while one is already ringing goes to voicemail.** One offer
   per agent at a time; there is no queue.
 - **One agent per Call Center definition.** More agents need more definitions.
@@ -523,7 +483,8 @@ built around and what has not been verified, is in [ISSUES.md](ISSUES.md).
 - **Calls are logged as Tasks**, not Salesforce Voice Call records — those
   require Service Cloud Voice.
 - **Recordings are not listed in the panel** — play them back in the Vobiz
-  Console. This is deliberate; see [Using it day to day](#using-it-day-to-day).
+  Console. This is deliberate: a panel that served recordings would mean the
+  calling backend could hand call audio to anyone able to reach it.
 - **No omnichannel presence.** The panel does not set agent availability.
 - **Only one Salesforce tab** may be open with the panel signed in.
 
