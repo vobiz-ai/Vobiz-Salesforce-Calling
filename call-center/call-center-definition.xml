@@ -15,8 +15,6 @@
                  calls ring the wrong person. Create a second Call Center per
                  agent. No Vobiz credentials, numbers or ids belong here:
                  agents sign in with their own account in the panel.
-    &backendUrl= Optional. Defaults to wherever the panel was served from,
-                 which is correct when the calling backend serves it.
     &apiVersion= Optional. Open CTI API version, default 64.0.
 
   Note that an ampersand is written &amp; inside XML. In the Salesforce UI

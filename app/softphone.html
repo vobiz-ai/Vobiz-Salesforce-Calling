@@ -236,7 +236,10 @@
           <p id="inbound-account-only" class="hint" hidden>
             Sign in with your Vobiz account to use this. Signed in with SIP
             direct, calls to your caller ID ring here once that number is
-            attached to an application whose answer URL is this backend.
+            attached to an application whose answer URL is this backend. The
+            caller's record still pops and the call is still logged, but
+            <strong>Record this call</strong> does not apply to these calls and
+            a caller nobody answers is not offered voicemail.
           </p>
           <p id="inbound-setup-status" class="hint"></p>
         </section>
@@ -254,20 +257,28 @@
         </summary>
 
         <div class="faq-item">
-          <h3>Why does the person I call hear ringing after answering?</h3>
+          <h3>Why does the call connect before the other person answers?</h3>
           <p>
-            Vobiz dials the customer first, then bridges your browser in. Those
-            few seconds of ringback are that second leg connecting. It is
-            expected, and the call order cannot be reversed.
+            Your browser places the call first: it connects to Vobiz and waits
+            in a private room, then Vobiz dials the number you called into that
+            room. The other person is already talking to you the moment they
+            pick up. Signed in with SIP direct, Vobiz dials the number straight
+            from your browser's call instead of through a room.
+          </p>
+          <p>
+            The call Task logs talk time from when the other person answered,
+            not from when you clicked Call. A call nobody answered is logged as
+            <strong>No answer</strong> with zero seconds.
           </p>
         </div>
 
         <div class="faq-item">
           <h3>Why is the Call button disabled?</h3>
           <p>
-            Calling needs both a signed-in account and a live SIP registration.
-            The hint under the button says which one is missing. Dialling
-            without registration would connect the customer to silence.
+            Calling needs both a sign-in and a live SIP registration. The hint
+            under the button says which one is missing. Every call starts from
+            your browser's own SIP connection, so without a registration there
+            is nothing to place the call with.
           </p>
         </div>
 
@@ -285,7 +296,9 @@
           <p>
             Tick <strong>Record this call</strong> before dialling and Vobiz
             records that call. Leave it clear and nothing is recorded, and
-            nothing is billed for recording.
+            nothing is billed for recording. Ticked when you accept an inbound
+            call, it records that call too — except signed in with SIP direct,
+            where inbound calls are not recorded.
           </p>
           <p>
             Play them back in the <strong>Vobiz Console</strong>, under

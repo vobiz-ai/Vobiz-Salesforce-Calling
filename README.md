@@ -297,9 +297,10 @@ curl -X POST "https://api.vobiz.ai/api/v1/Account/$AUTH_ID/numbers/%2B91XXXXXXXX
 - **Outbound** calls work as with an account sign-in: click-to-dial, screen
   pop, recording and the call Task.
 - **Inbound** calls to the **Calling from** number ring the panel directly,
-  with **Accept** and **Decline**. These calls do **not** open the caller's
-  record, are **not** logged as a Task, cannot be recorded, and do not go to
-  voicemail — a call nobody accepts simply ends.
+  with **Accept** and **Decline**. The caller's record opens while it rings,
+  and the call is logged as a Task — answered, missed or declined. These calls
+  cannot be recorded and do not go to voicemail: a call nobody accepts simply
+  ends.
 - **Not available:** the **Calling from** dropdown and **Enable inbound
   calls**, which need your Auth Token. The panel says "Sign in with your Vobiz
   account to use this."
@@ -369,9 +370,10 @@ call appears in the record's Activity History next to your other logged calls.
 
 | Task field | Value |
 |---|---|
-| Subject and Comments | `Vobiz call to +91XXXXXXXXXX` or `Vobiz call from +91XXXXXXXXXX` |
+| Subject and Comments | `Vobiz call to +91XXXXXXXXXX` or `Vobiz call from +91XXXXXXXXXX`, with `(no answer)`, `(missed)` or `(declined)` added when nobody talked |
 | Call Type | `Outbound` or `Inbound` |
-| Call Duration | Seconds, measured from when the panel's call connects to when it ends. A call that never connects is logged as 0. |
+| Call Duration | Talk time in seconds. For an outbound call it starts when the other person answers, not when you click **Call**, so ringing is not counted. For an inbound call it starts when you accept. A call nobody answered is logged as 0. |
+| Call Result | `No answer` (outbound), `Missed` or `Declined` (SIP direct inbound) when nobody talked; empty otherwise |
 | Status | `Completed` |
 | Due Date | The day of the call |
 | Name or Related To | The matched record: a **Contact** or **Lead** as **Name**, anything else (an Account, for example) as **Related To** |
@@ -426,7 +428,6 @@ Salesforce (the `&amp;` in the XML file is only XML escaping).
 |---|---|---|---|
 | `org` | **Yes** | Derived from the page framing the panel | Your My Domain URL, e.g. `https://your-org.my.salesforce.com`. The panel loads Salesforce's Open CTI toolkit from it, and accepts only Salesforce hosts. |
 | `agentId` | **Yes** | — | This agent's identity: 1–40 letters, digits, `-` or `_`. Different for every agent on the same Vobiz account. |
-| `backendUrl` | No | The address the panel was served from | Only for a backend you build yourself that runs on a different origin from the panel. Leave unset with the included backend, which accepts requests only from its own origin. |
 | `registrarUrl` | No | `wss://registrar.vobiz.ai:5063/` | The Vobiz SIP registrar. Must be a `wss://` address on `vobiz.ai`. Leave unset unless Vobiz support tells you otherwise. |
 | `apiVersion` | No | `64.0` | The Open CTI API version to load, such as `62.0`. |
 
@@ -496,8 +497,9 @@ Salesforce (the `&amp;` in the XML file is only XML escaping).
   recordings in the Vobiz Console.
 - **The adapter URL is not secret.** Any Salesforce admin can read it, so it
   carries no credentials by design. The panel checks every parameter on it:
-  `org` must be a Salesforce host, `registrarUrl` a Vobiz host, and a
-  `backendUrl` on another origin is only honoured inside Salesforce.
+  `org` must be a Salesforce host and `registrarUrl` a Vobiz host. There is no
+  parameter for the backend's address: the panel only ever talks to the
+  origin that served it.
 
 To report a vulnerability, see [SECURITY.md](SECURITY.md).
 
@@ -515,7 +517,7 @@ logged there with a specific message.
 | A change to the adapter URL has no effect | Salesforce caches it | Hard-refresh: <kbd>Ctrl</kbd>+<kbd>Shift</kbd>+<kbd>R</kbd> |
 | "Salesforce org not known" | `org` is missing from the adapter URL, or is not a Salesforce host | Add `?org=https://your-org.my.salesforce.com` |
 | "Not configured — set the Backend URL and Agent Identity" | `agentId` is missing from the adapter URL | Add `&agentId=<agent>` |
-| "Cannot reach the calling backend" | The backend is down, or `backendUrl` points somewhere else | Check `https://calling.example.com/healthz`; remove `backendUrl` when using the included backend |
+| "Cannot reach the calling backend" | The backend is down, or the panel is served from somewhere other than the backend | Check `https://calling.example.com/healthz`; serve the panel from the backend (`/salesforce/softphone.html`) |
 | "Vobiz rejected that Auth ID and Auth Token" | Wrong or stale credentials | Copy both again from Console → API credentials. The Auth Token is not your login password |
 | "Logged in … this account has no phone numbers yet" and **Call** stays disabled | The account has no active, voice-enabled number | Buy or activate a number in the Vobiz Console, then log in again |
 | The badge is green but calls end with "Please sign in to the softphone again" | The backend restarted, or the session expired (`SESSION_HOURS`) | Sign in again on the **Vobiz account** tab |
@@ -548,7 +550,9 @@ logged there with a specific message.
 - **Recordings and voicemails are only in the Vobiz Console**, not in the panel
   or in Salesforce.
 - **SIP direct:** no caller ID dropdown, no **Enable inbound calls**, and
-  inbound calls get no screen pop, no Task, no recording and no voicemail.
+  inbound calls cannot be recorded and get no voicemail.
+- **The panel must be served by the backend.** It talks only to the origin it
+  was loaded from; a backend on another origin is not supported.
 - **Inbound is set up per number** from the currently selected caller ID; to
   route several numbers, select each and click **Enable inbound calls** for
   each.

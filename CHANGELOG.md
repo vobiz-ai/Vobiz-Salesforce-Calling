@@ -5,6 +5,21 @@ Notable changes to this app. This project follows
 
 ## [Unreleased]
 
+### Fixed
+- **Outbound talk time no longer includes ring time.** The backend records when
+  the destination answers and reports it on a new `GET /call-state`; the panel
+  logs from that moment, and an unanswered call as 0 seconds, *No answer*.
+- **SIP direct inbound calls pop the caller's record and are logged as a
+  Task** (answered, missed or declined). The backend's `<Dial><User>` carries
+  the caller's number as `callerName`, and `/call-state` reports it as well.
+- The panel's FAQ said Vobiz dials the customer first. The browser calls first
+  and the destination is dialled into its room.
+
+### Removed
+- The `?backendUrl=` adapter parameter. The panel's requests are same-origin
+  cookie-authenticated JSON, so a backend on another origin could never answer
+  them; the panel now always talks to the origin that served it.
+
 ### Changed
 - **Any Vobiz account can sign in.** The reference backend has no account of
   its own: `VOBIZ_AUTH_ID`, `VOBIZ_AUTH_TOKEN` and `SIP_DIRECT_USERNAMES` are
