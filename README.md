@@ -1,568 +1,605 @@
 # Vobiz Calling for Salesforce
 
-A softphone that puts [Vobiz](https://www.vobiz.ai) telephony inside Salesforce
-Lightning. Agents place and receive real phone calls from the browser, phone
-numbers across the CRM become click-to-dial, the matching record pops on every
-call, and each finished call is logged as a Task — without leaving Salesforce.
+Vobiz Calling for Salesforce puts a [Vobiz](https://www.vobiz.ai) softphone
+inside Salesforce Lightning. Your agents make and take real phone calls in the
+browser, from a panel in the Salesforce utility bar. Phone numbers across
+Salesforce become click-to-dial, the matching record opens when a call starts,
+and every finished call is logged as a completed Task. The integration is built
+on Salesforce **Open CTI**, so there is no package to install: you run a small
+calling backend (included in this repository), and Salesforce frames the panel
+it serves.
 
-Built on **Open CTI**, so there is nothing to package and no review to wait for.
-You host a page; Salesforce frames it. A reference calling backend that serves
-that page and drives the calls is included in [`backend/`](backend/README.md).
+**Features**
+
+- **Click-to-call.** Click any phone number in Salesforce, or type one into the
+  panel, and the call goes out with two-way audio in the browser.
+- **Inbound calls with screen pop.** Calls to your Vobiz number ring the panel
+  with **Accept** and **Decline**, and the caller's record opens while it rings.
+- **Call logging.** Each finished call is written to Salesforce as a completed
+  Task, related to the matching Contact, Lead or other record.
+- **Recording.** Tick **Record this call** before dialling. Recordings are kept
+  in your Vobiz account and played back in the Vobiz Console.
+- **Caller ID choice.** Pick which of your Vobiz numbers outgoing calls show.
+- **Multi-agent.** Each agent gets their own phone line; an inbound call rings
+  every agent of that Vobiz account whose panel is open, and the first to
+  accept takes it.
+- **Two ways to sign in.** With your Vobiz account (Auth ID and Auth Token), or
+  directly with an existing SIP endpoint.
+- **Voicemail.** A caller nobody answers can leave a message.
 
 ---
 
 ## Contents
 
-- [What it does](#what-it-does)
-- [Before you start](#before-you-start)
 - [How it works](#how-it-works)
-  - [Why there is a backend](#why-there-is-a-backend)
-  - [Signing in: two ways](#signing-in-two-ways)
-  - [An outbound call, step by step](#an-outbound-call-step-by-step)
-  - [An inbound call, step by step](#an-inbound-call-step-by-step)
-  - [Why both directions use a conference](#why-both-directions-use-a-conference)
-  - [What Salesforce gets back](#what-salesforce-gets-back)
-- [Setting it up](#setting-it-up)
-- [Configuration](#configuration)
-- [Using it day to day](#using-it-day-to-day)
-- [Running it locally](#running-it-locally)
-- [Repository layout](#repository-layout)
+- [Requirements](#requirements)
+- [Quick start](#quick-start)
+- [Sign in](#sign-in)
+- [Using it](#using-it)
+- [Configuration reference](#configuration-reference)
+- [Deploying to production](#deploying-to-production)
+- [Security and privacy](#security-and-privacy)
+- [Troubleshooting](#troubleshooting)
 - [Limitations](#limitations)
-- [Security](#security)
-- [Support and licence](#support-and-licence)
-
----
-
-## What it does
-
-| | |
-|---|---|
-| **Outbound calling** | Dial from the panel, with two-way audio in the browser |
-| **Click-to-dial** | Every phone number across Salesforce becomes clickable |
-| **Inbound calling** | Calls to your Vobiz number ring the panel, with accept and decline |
-| **Screen-pop** | The matching record opens while the call is still connecting |
-| **Call logging** | Each finished call is written as a completed Task |
-| **Recording** | Tick a box before dialling; play back in the Vobiz Console |
-| **Two ways to sign in** | Account credentials, or a single SIP endpoint |
-
-Two design decisions are worth knowing about, though an agent never sees either.
-
-**Both directions use a conference room** rather than a direct bridge, which is
-what keeps audio reliable in a browser. See [Why both directions use a
-conference](#why-both-directions-use-a-conference).
-
-**The browser always places the call, never receives one.** Even on an incoming
-call, the panel dials out to join the caller.
-
----
-
-## Before you start
-
-### 1. Salesforce
-
-- **Lightning Experience**, with **admin access**. Developer Edition is fine for
-  evaluation.
-- Your **My Domain host** — the `https://<something>.my.salesforce.com` address,
-  found at Setup → **My Domain**. You will need it; it is not the
-  `lightning.force.com` address you browse.
-
-### 2. Vobiz
-
-From the [Vobiz Console](https://console.vobiz.ai):
-
-- An **Auth ID** and **Auth Token**.
-- At least one **phone number** on the account. Carriers reject a call that
-  presents no caller ID.
-- For **SIP direct**, a **SIP endpoint** with a username and password (Console →
-  Voice → Endpoints). Save the password when you create it — Vobiz does not show
-  it again. Attach the endpoint and its number to an application whose answer
-  URL is your backend's `/answer` — see
-  [backend/README.md → SIP direct](backend/README.md#signing-in-with-sip-direct).
-
-None of these go into the backend's configuration. Agents type them into the
-panel, and any Vobiz account works.
-
-### 3. A calling backend
-
-**The panel holds no Vobiz credentials and cannot place a call by itself.** It
-talks to a small service you run, which drives the Vobiz REST API and answers
-Vobiz's webhooks.
-
-**This repository includes one:** [`backend/`](backend/README.md) is a
-dependency-free Node.js server (Node 20.12 or later) that implements the whole
-contract and serves the panel too. Run it as-is to evaluate and demo, and read
-its [production notes](backend/README.md#running-it-in-production) before real
-traffic.
-
-To build your own instead — in another language, or inside an existing service —
-implement **[docs/backend-contract.md](docs/backend-contract.md)**: every
-endpoint, the request and response shapes, and the security requirements.
-
-Either way the backend must be reachable **from the public internet over
-HTTPS**, because Vobiz calls its webhooks. During development that is a tunnel.
-
-### 4. Somewhere to host the panel
-
-The reference backend serves it at `/salesforce/softphone.html`, so there is
-nothing extra to host. If you build your own backend, serve `app/` from it —
-see [Host the panel](#3-host-the-panel).
+- [Development](#development)
+- [Support and links](#support-and-links)
 
 ---
 
 ## How it works
 
-### Why there is a backend
-
-Vobiz's REST API is authenticated with your account **Auth Token**. Putting that
-in a browser would hand every agent full control of the account — numbers,
-billing, other people's calls.
-
-So the browser never sees it. The panel talks only to your backend, and the
-backend does three things:
-
-1. Holds the Vobiz credentials and calls the Vobiz REST API.
-2. Answers Vobiz's **answer webhook** — Vobiz asks "a call just arrived, what
-   should I do with it?" and the backend replies with VobizXML.
-3. Keeps a little per-agent state: who is signed in, which number they call
-   from, and which caller is currently ringing them.
-
 ```
-   ┌──────────────┐      HTTPS       ┌─────────────────┐     REST API    ┌────────┐
-   │  the panel   │ ───────────────▶ │  your backend   │ ──────────────▶ │ Vobiz  │
-   │ (in browser) │ ◀─────────────── │  (your server)  │ ◀────────────── │        │
-   └──────┬───────┘                  └─────────────────┘  answer webhook └───┬────┘
-          │                                                                  │
-          └────────────── SIP over WebSocket + audio ────────────────────────┘
+   Salesforce (Lightning)                 your backend                   Vobiz
+ ┌────────────────────────┐   HTTPS   ┌──────────────────┐  REST API  ┌──────────┐
+ │  Open CTI panel        │ ────────▶ │ backend/server.js│ ─────────▶ │ API      │
+ │  (utility bar)         │ ◀──────── │                  │ ◀───────── │ webhooks │
+ └───────────┬────────────┘           └──────────────────┘            └────┬─────┘
+             │                                                             │
+             └──────────── SIP over secure WebSocket + call audio ─────────┘
 ```
 
-Audio never touches your backend. It runs directly between the browser and Vobiz.
+- **Salesforce frames a page you host.** A Call Center record holds the panel's
+  URL; the panel loads Salesforce's Open CTI toolkit to make numbers clickable,
+  open records and write Tasks.
+- **Your backend serves the panel and holds the Vobiz session.** The panel
+  never calls the Vobiz API itself. It talks only to your backend, which calls
+  the Vobiz REST API and answers Vobiz's webhooks.
+- **Audio goes straight between the browser and Vobiz.** The panel registers as
+  a Vobiz SIP endpoint over a secure WebSocket (`wss://registrar.vobiz.ai`).
+  Call audio never passes through your backend.
+- **Outbound:** the browser places the call, Vobiz asks your backend what to do
+  (`/answer`), and the backend puts the agent in a conference room and dials
+  the destination into it.
+- **Inbound:** Vobiz asks your backend (`/inbound-answer`), the backend holds
+  the caller in a conference room with hold audio, and the panel rings. When
+  the agent accepts, the panel joins that room.
+- **Salesforce gets the result:** the record pops when the call starts, and a
+  Task is written when it ends.
 
-### Signing in: two ways
-
-The panel offers two tabs, and **any Vobiz account works with either**. Nothing
-about an account is configured on the backend: no Auth ID, Auth Token, SIP
-credentials, caller ID or number in `.env`. Agents on different Vobiz accounts
-can use the same backend at the same time.
-
-| | **Vobiz account** tab | **SIP direct** tab |
-|---|---|---|
-| Agent enters | **Auth ID** and **Auth Token** | The endpoint's **SIP username** and **password** |
-| What it proves | Which Vobiz *account* pays for the call | Which *phone line* the browser is |
-| Where the SIP identity comes from | The backend provisions or looks one up | The agent supplies it directly |
-| Caller ID | Chosen from a dropdown of the account's active, voice-enabled numbers | Typed into **Calling from** (E.164) |
-| Backend involvement at sign-in | Validates with Vobiz, provisions the endpoint, returns the SIP identity | Told the SIP username and caller ID only — never the password |
-| Setup in the Vobiz Console | None | Endpoint and number attached to an application pointing at the backend |
-| Outbound calls | Conference bridge, destination dialled over the REST API | `<Dial>` from the backend's answer XML |
-
-#### Vobiz account flow
-
-```
- agent types Auth ID + Auth Token
-            │
-            ▼
-   POST /login  ──▶  backend validates against Vobiz
-            │        and lists the account's numbers
-            ▼
-   backend finds or creates this integration's application in that
-   account, and one SIP endpoint for this agent, with a fresh password
-            │
-            ▼
-   GET /agent/{agentId}  ──▶  returns SIP username + password
-            │
-            ▼
-   panel registers with the Vobiz registrar over WebSocket  ──▶  Ready
-```
-
-The agent then picks which of the account's numbers outgoing calls present.
-
-#### SIP direct flow
-
-```
- agent types SIP username + password + the number to call from
-            │
-            ▼
-   POST /sip-direct  ──▶  backend records SIP user -> caller ID
-            │             (the password is never sent)
-            ▼
-   panel registers with the Vobiz registrar over WebSocket  ──▶  Ready
-```
-
-Vobiz asks your backend's `/answer` webhook what to do with every call the
-endpoint places, so **the endpoint, and the number typed as caller ID, must be
-attached to an Application whose answer URL is your backend** — the Console
-steps and the API equivalent are in
-[backend/README.md → SIP direct](backend/README.md#signing-in-with-sip-direct).
-Outbound calls are dialled by `<Dial callerId="…">` in the answer XML; a call
-to the typed number rings this endpoint with `<Dial><User>`.
-
-The caller ID cannot be looked up — listing an account's numbers is precisely
-what endpoint credentials do not authorise — so the agent types it. The panel
-**refuses to connect without one**: carriers reject a call with no caller ID,
-and that failure says nothing about the cause. Vobiz refuses a caller ID the
-endpoint's account does not own.
-
-#### What SIP direct cannot do
-
-- **The number dropdown and Enable inbound calls** — both need the account API.
-  The panel says "Sign in with your Vobiz account to use this."
-
-Everything else — dialling, click-to-dial, screen-pop, recording, the call
-Task — is identical.
-
-### An outbound call, step by step
-
-```
- 1. agent clicks Call, or clicks a phone number in Salesforce
-            │
-            ▼
- 2. browser sends a SIP INVITE to sip:<destination>@<registrar>
-            │                                    │
-            │                                    ▼
- 3.         │                        Vobiz asks the backend's answer URL
-            │                                    │
-            │                                    ▼
- 4.         │                        backend replies "join conference room R"
-            │                        and, over the REST API, dials the
-            │                        destination into that same room R
-            ▼                                    │
- 5. agent waits in room R  ◀────────────────────┘
-            │
-            ▼
- 6. destination answers, enters room R, audio flows both ways
-```
-
-The destination's phone rings **once**. Step 2 never reaches the phone network —
-it terminates inside your Vobiz application, which is why the backend's answer
-URL is called at all.
-
-**Two CDRs are produced per call**, one per leg. That is normal: they are the
-two halves of one conversation, with matching durations.
-
-### An inbound call, step by step
-
-```
- 1. someone calls your Vobiz number
-            │
-            ▼
- 2. Vobiz asks the backend's inbound answer URL
-            │
-            ▼
- 3. backend parks the caller in conference room R with hold audio,
-    and notes that agent A has a call ringing
-            │
-            ▼
- 4. panel polls GET /inbound-pending/{agentId} once a second, sees the
-    offer, rings, and shows the caller's number
-            │
-            ▼
- 5. agent clicks Accept  ──▶  POST /inbound-accept
-            │
-            ▼
- 6. browser places an ordinary OUTGOING call to the caller's number
-            │
-            ▼
- 7. backend recognises it as the expected join and replies
-    "join conference room R" instead of dialling anyone
-            │
-            ▼
- 8. both legs are in room R, audio flows both ways
-```
-
-Step 6 looks wrong and is not: the browser has to dial something Vobiz can
-route, and a room name is not routable — Vobiz's routing service rejects a
-non-numeric destination outright. So the browser dials the caller's number, and
-the backend substitutes the conference join before that number is ever rung.
-**The caller is never called back.**
-
-If no panel is listening when a call arrives, the backend sends the caller
-straight to voicemail rather than holding them for an agent who is not there.
-
-**Hanging up:** ending the call in the panel ends the agent's leg only — the
-caller holds the room on their own and would otherwise stay connected in
-silence. The panel therefore tells the backend, which releases the caller's leg
-(`POST /inbound-hangup`). This works in reverse too: if the caller hangs up
-first, their leg is already gone and the call is simply closed out.
-
-### Why both directions use a conference
-
-Both directions put the agent and the other party into a **conference room**
-rather than bridging the two legs directly.
-
-**Inbound** has to. A call cannot be delivered into a browser's registered SIP
-endpoint, so there is no way to simply ring the panel. A conference is how both
-parties end up in the same audio path — the caller waits in the room, and the
-panel joins it.
-
-**Outbound** does the same because it is the more reliable path for browser
-audio: the agent waits in the room and the destination is dialled into it, each
-leg established the way that leg works best. A direct bridge between a browser
-leg and a phone leg is more fragile in practice, and a call that connects
-without audio is worse than one that fails outright.
-
-The cost is **two CDRs per call**, one per leg, with matching durations. They
-are the two halves of one conversation — worth knowing when you read call
-records or reconcile billing.
-
-### What Salesforce gets back
-
-**Click-to-dial.** Phone numbers across Salesforce become clickable — the app
-turns this on; nothing in Salesforce does it by itself. Clicking one opens the
-panel and dials.
-
-**Screen-pop.** An inbound caller's record opens while the panel is still
-ringing. An outbound call from click-to-dial stays on the record that was
-clicked; a typed number is looked up and its record opened as the call starts.
-One match pops automatically; several leave Salesforce's search results for the
-agent to choose from.
-
-**A call Task.** When a call ends, the panel writes a completed **Task** —
-direction, talk time, and a description, related to the matched record: a
-Contact or Lead as the Task's **Name**, anything else (an Account, say) as its
-**Related To**. A Task
-is what Salesforce's own call logging produces, so these appear in Activity
-History next to every other logged call.
-
-**Talk time, not ring time.** A call that rang for 30 seconds and talked for 10
-is logged as 10 seconds. An unanswered call is logged as zero.
-
-**A CRM failure never breaks a call.** The call already happened; if the lookup
-or the write fails it is logged to the console and the panel returns to Ready,
-rather than showing a telephony error for a CRM problem.
+Because each call is a conference with two legs, **each call produces two Vobiz
+call records (CDRs)**, one per leg, with matching durations.
 
 ---
 
-## Setting it up
+## Requirements
 
-Full walkthrough with exact menu paths: **[docs/install.md](docs/install.md)**.
-In outline:
+**Vobiz**
 
-### 1. Run the calling backend
+- A Vobiz account. Your **Auth ID** and **Auth Token** are on the
+  [Vobiz Console](https://console.vobiz.ai) dashboard, under **API
+  credentials**. The Auth Token is not your login password.
+- At least one **phone number** on the account. Carriers reject a call that
+  presents no caller ID.
+- Account **balance** for calls and recordings.
 
-```bash
-cp backend/.env.example backend/.env       # set PUBLIC_BASE_URL
-node backend/server.js
-```
+**Salesforce**
 
-[backend/README.md](backend/README.md) has the details, including what it
-creates on your Vobiz account and when. To write your own instead, implement
-[docs/backend-contract.md](docs/backend-contract.md).
+- **Lightning Experience**, in an edition that includes Call Centers and Open
+  CTI (Professional, Enterprise, Performance, Unlimited or Developer Edition).
+- A **System Administrator** (or a user who can manage Call Centers, Trusted
+  URLs, Session Settings and the App Manager).
+- Your **My Domain** URL — the `https://<your-org>.my.salesforce.com` address
+  at Setup → **My Domain**. It is not the `lightning.force.com` address you
+  browse.
 
-### 2. Trust the host in Salesforce
+**Your backend**
 
-Setup → **Trusted URLs** → New, with **`frame-src`** ticked. Without this
-Salesforce refuses to frame the panel and shows a blank box.
+- A server with **Node.js 20.12 or later**. The backend has no dependencies, so
+  there is no `npm install`.
+- A **public HTTPS URL** for it, such as `https://calling.example.com`, with a
+  valid certificate. Vobiz calls its webhooks there and Salesforce frames the
+  panel from there. Salesforce will not frame a plain-HTTP page.
 
-### 3. Host the panel
+**Agents**
 
-The reference backend already serves it, at
-`https://<your backend>/salesforce/softphone.html`. With your own backend,
-**serve `app/` from it too**, for two reasons:
-
-- Salesforce stores only a URL, so **every extra hostname is another thing that
-  goes stale independently**. One origin, one thing to keep alive.
-- Same origin means the panel's own calls to the backend are **not cross-origin
-  at all**, so no CORS preflight is involved.
-
-### 4. Create the Call Center
-
-Setup → **Call Centers** → **Import**
-[`call-center/call-center-definition.xml`](call-center/call-center-definition.xml),
-then edit the record and set your own adapter URL with its
-[parameters](#configuration).
-
-### 5. Assign users, and add the utility item
-
-**Manage Call Center Users** → add yourself. Then Setup → **App Manager** → edit
-your Lightning app → **Utility Items** → **Open CTI Softphone**.
-
-### 6. Hard-refresh and open it
-
-<kbd>Ctrl</kbd>+<kbd>Shift</kbd>+<kbd>R</kbd>, then click **Phone**. Salesforce
-caches the adapter URL; a normal refresh keeps the old one.
+- A current desktop **Chrome, Edge or Firefox**, with a **microphone** and
+  speakers or a headset.
 
 ---
 
-## Configuration
+## Quick start
 
-Salesforce provides no settings UI, so every setting travels on the adapter
-URL's query string:
+1. **Get the code.**
 
-```
-https://calling.example.com/salesforce/softphone.html?org=https://your-org.my.salesforce.com&agentId=agent-one
-```
+   ```bash
+   git clone https://github.com/vobiz-ai/Vobiz-Salesforce-Calling.git
+   cd Vobiz-Salesforce-Calling
+   ```
 
-| Parameter | Required | Default | What it is |
-|---|---|---|---|
-| `org` | **yes** | derived from the framing page | Your My Domain host. Open CTI is served per-org and there is no CDN copy, so the panel must be told where to load the toolkit from. |
-| `agentId` | **yes** | — | Which identity this call centre registers as. **Every agent on the same Vobiz account needs a different value**, or calls ring the wrong person. Agents on different Vobiz accounts may reuse a value. |
-| `backendUrl` | no | wherever the panel was served from | Only needed when the panel is hosted away from the backend. Honoured only when Salesforce frames the panel. |
-| `registrarUrl` | no | `wss://registrar.vobiz.ai:5063/` | Leave alone unless Vobiz support says otherwise. Must be a `wss://` host on `vobiz.ai`. |
-| `apiVersion` | no | `64.0` | Open CTI API version, such as `62.0`. |
+2. **Configure the backend.** Only deployment settings go here — no Vobiz
+   credentials. Agents sign in from the panel.
 
-**For several agents, create one Call Center definition per agent**, each with a
-different `agentId`, and assign the right users to each.
+   ```bash
+   cp backend/.env.example backend/.env
+   ```
 
----
+   Set `PUBLIC_BASE_URL` to the public HTTPS address of this server, with no
+   trailing slash:
 
-## Using it day to day
+   ```bash
+   PUBLIC_BASE_URL=https://calling.example.com
+   PORT=8080
+   ```
 
-**Sign in** on either tab. Wait for the status badge to turn green before
-dialling — the Call button stays disabled until the SIP endpoint registers,
-deliberately, because dialling with SIP down rings the customer into silence.
+   Every setting is listed in the [Configuration reference](#configuration-reference).
 
-**Make a call** by typing a number and clicking **Call**, or by clicking any
-phone number in Salesforce.
+3. **Start it.**
 
-The first call prompts for **microphone permission**. If it never prompts and
-the call is silent, see the microphone note in
-[docs/install.md](docs/install.md#microphone-access).
+   ```bash
+   npm start          # same as: node backend/server.js
+   ```
 
-**Receive calls** by clicking **Enable inbound calls** once, on the Vobiz
-account tab. After that:
+   It prints the panel URL and the webhook URLs it will hand to Vobiz.
 
-- Keep the Salesforce tab **open**, and **only one tab**. Several tabs register
-  the same SIP identity and evict each other, so a call can ring a tab that is
-  no longer the one Vobiz will reach.
-- When a call arrives the panel rings and shows the caller's number, with
-  **Accept** and **Decline**. <kbd>Enter</kbd> and <kbd>Esc</kbd> do the same.
-- **Accept** connects you. **Decline** sends the caller to voicemail.
+4. **Expose it publicly.** Put the server behind HTTPS at `PUBLIC_BASE_URL` —
+   a reverse proxy with a certificate, or your hosting platform's HTTPS. Check
+   it from outside your network:
 
-**Record a call** by ticking **Record this call** before dialling. It applies to
-inbound too — recording starts when you accept, so the caller's time on hold is
-not in the file. Play recordings back in the **Vobiz Console → Voice →
-Recordings**; the panel deliberately does not serve them, because doing so would
-mean the calling backend could hand call recordings to anyone able to reach it.
+   ```bash
+   curl https://calling.example.com/healthz      # {"ok":true}
+   ```
 
-### Call setup speed
+   For a quick trial on your own machine, a Cloudflare quick tunnel works:
+   `cloudflared tunnel --url http://localhost:8080`. Use a tunnel that does not
+   show a browser warning page; Salesforce cannot display one inside its frame.
 
-The browser has work to do before it can send a call: it takes the microphone,
-then gathers network candidates. Left alone that can take tens of seconds — and
-on an inbound call the caller is on hold for all of it.
+5. **Trust the backend in Salesforce.** Setup → **Trusted URLs** → **New
+   Trusted URL**. Set the URL to your backend's origin
+   (`https://calling.example.com`), CSP Context **All**, and tick the
+   **`frame-src`** and **`connect-src`** directives. Under **Permissions Policy
+   Directives**, tick **microphone**. Save.
 
-Two things keep it short. The offer is polled every second and the **microphone
-is acquired while the banner is still ringing**, so accepting does not stop to
-ask for one. And candidate gathering is **capped at 2.5 seconds** — the call is
-sent as soon as one usable candidate exists.
+   If **microphone** is greyed out, go to Setup → **Session Settings** →
+   **Browser Feature Permissions**, set **Microphone** to **Trusted URLs
+   Only**, save, and come back.
 
-That cap is a correctness fix as much as a speed one: candidates carry
-short-lived network reservations, and an offer held back for tens of seconds can
-describe a path that has already lapsed — which connects and bills a call with
-no audio at all.
+6. **Create the Call Center.** Setup → **Call Centers** → **Import**, and
+   choose [`call-center/call-center-definition.xml`](call-center/call-center-definition.xml)
+   from this repository. Open the imported **Vobiz Calling** record, click
+   **Edit**, and set **CTI Adapter URL** to:
 
-If setup is consistently slow, check for **many virtual network adapters** —
-VPNs, Docker and similar each add interfaces the browser must enumerate.
+   ```
+   https://calling.example.com/salesforce/softphone.html?org=https://your-org.my.salesforce.com&agentId=agent-one
+   ```
 
----
+   Use your own backend host, your own My Domain URL, and an `agentId` for this
+   agent (letters, digits, `-` or `_`, up to 40 characters). Save.
 
-## Running it locally
+7. **Assign users.** On the Call Center record, click **Manage Call Center
+   Users** → **Add More Users**, select the agent, and click **Add to Call
+   Center**. Each agent needs their own Call Center with their own `agentId` —
+   see [Several agents](#several-agents).
 
-There is no build step and no framework.
+8. **Add the phone to your app.** Setup → **App Manager** → your Lightning app
+   (for example **Service Console**) → **Edit** → **Utility Items (Desktop
+   Only)** → **Add Utility Item** → **Open CTI Softphone**. Set the height to at
+   least 600 and the width to 400. Save.
 
-```bash
-cloudflared tunnel --url http://localhost:8080     # note the https:// URL it prints
-cp backend/.env.example backend/.env               # PUBLIC_BASE_URL=<that URL>
-node backend/server.js
-npm test                                           # the test suite, no account needed
-```
+9. **Open it.** Open that app and **hard-refresh** the page
+   (<kbd>Ctrl</kbd>+<kbd>Shift</kbd>+<kbd>R</kbd>, or
+   <kbd>Cmd</kbd>+<kbd>Shift</kbd>+<kbd>R</kbd> on a Mac). Salesforce caches the
+   adapter URL, and a normal refresh keeps the old one. Click **Phone** in the
+   utility bar, then [sign in](#sign-in).
 
-Salesforce will not frame a plain-HTTP origin, and Vobiz cannot reach your
-laptop, so local work needs a tunnel. It must **not** show a browser
-interstitial: a frame cannot suppress one, and Salesforce shows a blank panel
-instead. ngrok's free tier does show one; Cloudflare quick tunnels do not.
-
-Then point a Call Center at
-`https://<tunnel>/salesforce/softphone.html?org=…&agentId=…` and hard-refresh
-Salesforce. A quick tunnel gets a **new URL every restart** — update
-`PUBLIC_BASE_URL`, the adapter URL, and sign in again so the backend re-points
-the account's Application (a new answer URL means a new application is found
-or created for it). A wildcard Trusted URL (`https://*.trycloudflare.com`)
-saves re-doing step 2 each time.
-
-**Editing:** change a file, hard-refresh Salesforce. There is nothing to
-rebuild. Keep the browser console open — every failure mode names itself there,
-and the message is more specific than anything Salesforce shows on screen.
+A step-by-step walkthrough of the Salesforce side, with more troubleshooting, is
+in [docs/install.md](docs/install.md).
 
 ---
 
-## Repository layout
+## Sign in
 
-| Path | What it is |
+The panel has two tabs: **Vobiz account** and **SIP direct**. Any Vobiz account
+works with either, and agents on different Vobiz accounts can use the same
+backend at the same time.
+
+### Vobiz account (recommended)
+
+Enter your **Auth ID** (`MA_XXXXXXXX`) and **Auth Token**, then click **Log in**.
+
+The backend checks the pair with Vobiz and lists the account's numbers. Then,
+in **your** Vobiz account, it sets up:
+
+| What | Details |
 |---|---|
-| `app/softphone.html` | The panel's markup |
-| `app/softphone.js` | The panel: sign-in, dialpad, call handling, CRM lookups |
-| `app/opencti-host.js` | The Salesforce integration layer, backed by the Open CTI toolkit |
-| `app/style.css` | Styles |
-| `app/lib/jssip.min.js` | Vendored JsSIP browser bundle |
-| `call-center/` | The Call Center definition to import |
-| `backend/` | The reference calling backend, which also serves the panel |
-| `tests/` | The test suite (`npm test`): the panel's Open CTI wiring and URL checks, and every backend route against a fake Vobiz API |
-| `docs/backend-contract.md` | **Every endpoint a backend must implement**, and its security requirements |
-| `docs/install.md` | The Salesforce-side walkthrough, with troubleshooting |
-| `docs/architecture.md` | Open CTI, the host adapter, and both call flows in detail |
-| `tools/check-docs.mjs` | The documentation link checker CI runs |
+| One application, **`VobizSF`** | Answer URL `<PUBLIC_BASE_URL>/answer` (method `POST`). Found by that answer URL if it already exists, otherwise created. An application with any other answer URL is never changed. |
+| One SIP endpoint per agent | Alias `vobiz-sf-<agentId>`, attached to `VobizSF`. Reused on later sign-ins. Each sign-in gives it a new random password, which only that agent's browser receives. |
+
+The panel then registers with that endpoint, and the status badge turns green
+(**Ready**).
+
+**Choose a caller ID.** **Calling from** lists every active, voice-enabled
+number on the account, with the application each is on now. Your first number
+is selected; pick another at any time. The backend refuses a number that is not
+on the account.
+
+**Enable inbound calls.** To have calls to your number ring the panel, click
+**Enable inbound calls** once, under **Receive calls here**. This:
+
+- finds or creates a second application, **`VobizSF_in`**, with answer URL
+  `<PUBLIC_BASE_URL>/inbound-answer`, and
+- attaches the number selected in **Calling from** to it.
+
+**This moves that number off the application it is on now**, so any other
+setup that number was routed to stops receiving its calls. The dropdown shows
+the number's current application, and when you click the button the panel
+confirms the change and names the application the number was moved off. This
+button is the only thing in the integration that changes where a number's calls
+go. To move the number back, attach it to its previous application in the Vobiz
+Console.
+
+### SIP direct
+
+Use this tab to sign in as an endpoint you already have, without giving the
+backend your Auth Token. Enter:
+
+- **SIP username** and **SIP password** of the endpoint (Vobiz Console →
+  Voice → Endpoints). Vobiz shows an endpoint's password only when you set it;
+  if you do not have it, set a new one on the endpoint.
+- **Calling from** — the number outgoing calls show, in E.164 format
+  (`+91XXXXXXXXXX`). It must be a number on the endpoint's account. The panel
+  will not connect without one.
+
+Tick **Remember these** to keep them in this browser (see
+[Security and privacy](#security-and-privacy)), then click **Connect**.
+
+**Before an agent uses SIP direct**, point the endpoint and the number at your
+backend. In the [Vobiz Console](https://console.vobiz.ai):
+
+1. **Voice → Applications → Create.** Answer URL
+   `https://calling.example.com/answer`, method `POST`. Set the hangup URL to the
+   same address.
+2. **Voice → Endpoints.** Open the endpoint and set its **Application** to the
+   one you just created.
+3. **Phone Numbers.** Open the number the agent will type as **Calling from**
+   and attach it to the same application.
+
+The same steps with the Vobiz API:
+
+```bash
+# 1. Create the application and note the app_id it returns
+curl -X POST "https://api.vobiz.ai/api/v1/Account/$AUTH_ID/Application/" \
+  -H "X-Auth-ID: $AUTH_ID" -H "X-Auth-Token: $AUTH_TOKEN" -H "Content-Type: application/json" \
+  -d '{"app_name":"VobizSF","answer_url":"https://calling.example.com/answer","answer_method":"POST","hangup_url":"https://calling.example.com/answer","hangup_method":"POST"}'
+
+# 2. Attach the endpoint to it (the app_id as a string)
+curl -X POST "https://api.vobiz.ai/api/v1/Account/$AUTH_ID/Endpoint/$ENDPOINT_ID/" \
+  -H "X-Auth-ID: $AUTH_ID" -H "X-Auth-Token: $AUTH_TOKEN" -H "Content-Type: application/json" \
+  -d '{"app_id":"<app_id>"}'
+
+# 3. Attach the number (E.164, with + written as %2B)
+curl -X POST "https://api.vobiz.ai/api/v1/Account/$AUTH_ID/numbers/%2B91XXXXXXXXXX/application" \
+  -H "X-Auth-ID: $AUTH_ID" -H "X-Auth-Token: $AUTH_TOKEN" -H "Content-Type: application/json" \
+  -d '{"application_id":"<app_id>"}'
+```
+
+**What works differently with SIP direct:**
+
+- **Outbound** calls work as with an account sign-in: click-to-dial, screen
+  pop, recording and the call Task.
+- **Inbound** calls to the **Calling from** number ring the panel directly,
+  with **Accept** and **Decline**. These calls do **not** open the caller's
+  record, are **not** logged as a Task, cannot be recorded, and do not go to
+  voicemail — a call nobody accepts simply ends.
+- **Not available:** the **Calling from** dropdown and **Enable inbound
+  calls**, which need your Auth Token. The panel says "Sign in with your Vobiz
+  account to use this."
+- One number per SIP sign-in: a second SIP direct agent cannot use a number
+  another signed-in SIP direct agent is already using.
+
+### Several agents
+
+Salesforce stores one adapter URL per Call Center, so **create one Call Center
+per agent**, each with a different `agentId`, and assign each agent to their
+own. For each extra agent, copy
+`call-center/call-center-definition.xml`, change its **InternalName**,
+**Display Name** and the `agentId` in the adapter URL, and import the copy.
+
+Every agent on the same Vobiz account needs a **different `agentId`** — the
+`agentId` decides which SIP endpoint an agent gets, so two agents sharing one
+would take each other's calls. Agents on different Vobiz accounts can reuse a
+value.
 
 ---
 
-## Limitations
+## Using it
 
-Worth knowing before you roll it out.
+### Make a call
 
-- **Two CDRs per call**, one per leg — a consequence of the conference bridge,
-  and the thing to know when reconciling call records.
-- **A second caller while one is already ringing goes to voicemail.** One offer
-  per agent at a time; there is no queue.
-- **One agent per Call Center definition.** More agents need more definitions.
-- **Browser calling only.** No option to route calls to a mobile or desk phone.
-- **No hold, mute, transfer or conference** between agents.
-- **Calls are logged as Tasks**, not Salesforce Voice Call records — those
-  require Service Cloud Voice.
-- **Recordings are not listed in the panel** — play them back in the Vobiz
-  Console. This is deliberate: a panel that served recordings would mean the
-  calling backend could hand call audio to anyone able to reach it.
-- **No omnichannel presence.** The panel does not set agent availability.
-- **Only one Salesforce tab** may be open with the panel signed in.
+Wait for the status badge to turn green. The **Call** button stays disabled
+until the panel is both signed in and registered, and the hint under it says
+which is missing.
+
+Then type a number in E.164 format and click **Call**, or click any phone
+number in Salesforce — the panel opens and dials it. Click **Hang up** to end
+the call.
+
+The first call asks for **microphone** permission. Allow it, or the other side
+hears nothing.
+
+If the other side is busy or rejects the call, it ends straight away. If
+nobody answers, it ends after `OUTBOUND_RING_SECONDS` (45 by default).
+
+### Receive a call
+
+After **Enable inbound calls** (account sign-in), a call to your number:
+
+1. Rings every open panel signed in to that Vobiz account. The caller hears
+   "Please hold while we connect you."
+2. The panel plays a ringtone, shows the caller's number, and opens their
+   record in Salesforce.
+3. **Accept** (or <kbd>Enter</kbd>) connects you. **Decline** (or
+   <kbd>Esc</kbd>) sends the caller to voicemail. The first agent to accept
+   takes the call; it stops ringing everywhere else.
+4. If nobody accepts within `INBOUND_RING_SECONDS` (45 by default), the caller
+   goes to voicemail.
+
+The caller goes **straight to voicemail** when no panel of that account is
+listening — the Salesforce tab is closed, or every agent is already on a call
+or being rung. If nobody from that account has signed in since the backend
+started, the caller hears "Sorry, this number cannot take calls right now" and
+the call ends.
+
+Keep **one** Salesforce tab with the panel open. Several tabs register the same
+phone line and replace each other.
+
+### Call logging
+
+When a call ends, the panel writes a completed **Task** to Salesforce, so the
+call appears in the record's Activity History next to your other logged calls.
+
+| Task field | Value |
+|---|---|
+| Subject and Comments | `Vobiz call to +91XXXXXXXXXX` or `Vobiz call from +91XXXXXXXXXX` |
+| Call Type | `Outbound` or `Inbound` |
+| Call Duration | Seconds, measured from when the panel's call connects to when it ends. A call that never connects is logged as 0. |
+| Status | `Completed` |
+| Due Date | The day of the call |
+| Name or Related To | The matched record: a **Contact** or **Lead** as **Name**, anything else (an Account, for example) as **Related To** |
+
+**How the record is matched (screen pop).** A click-to-dial uses the record you
+clicked. A typed number, and an inbound caller's number, are searched in
+Salesforce when the call starts: one match opens automatically; several leave
+Salesforce's search results on screen for you to choose; no match logs the Task
+with no related record.
+
+A Salesforce error never interrupts a call. If the search or the Task write
+fails, the call carries on and the panel returns to **Ready**.
+
+### Recordings
+
+Tick **Record this call** before you click **Call**. For an inbound call, tick
+it before you click **Accept**; recording starts when you join, so the caller's
+time on hold is not in the file. Recorded calls are billed by Vobiz.
+
+Recordings — and voicemail messages — are stored in your Vobiz account. Play
+or download them in the **Vobiz Console → Voice → Recordings**. The panel and
+the backend do not list or serve recordings.
 
 ---
 
-## Security
+## Configuration reference
 
-The panel stores no credentials of its own beyond what an agent explicitly asks
-it to remember, and that stays in their browser on their machine.
+### Backend (`backend/.env` or environment variables)
 
-Your Vobiz Auth Token belongs to your **backend**, never to the browser. On the
-account tab the agent types it once; the backend uses it and keeps it in memory
-only. The security of this integration is therefore almost entirely the
-security of your backend — the reference one meets every requirement below, and
-[backend/README.md](backend/README.md#security) says how:
-[docs/backend-contract.md](docs/backend-contract.md#security-requirements) has
-the checklist, including the endpoints that are easy to implement in a way that
-leaks call recordings. Please read it.
+The backend reads these, and nothing else. There are no Vobiz credentials in
+its configuration.
 
-The **SIP direct** tab exists partly for this reason: an agent who only ever
-works one endpoint can sign in without account-wide credentials ever reaching
-the backend, and the SIP password goes only to the Vobiz registrar.
+| Variable | Required | Default | Meaning |
+|---|---|---|---|
+| `PUBLIC_BASE_URL` | **Yes** | — | The public `https://` address Vobiz and Salesforce reach the backend at, without a trailing slash. Every webhook URL given to Vobiz is built from it. The backend will not start without it. |
+| `PORT` | No | `8080` | Port the server listens on. |
+| `DATA_DIR` | No | `backend/data` | Folder for `endpoints.json`, the map of which SIP endpoint belongs to which agent. |
+| `SALESFORCE_FRAME_ANCESTORS` | No | `https://*.lightning.force.com https://*.my.salesforce.com https://*.force.com` | Which sites may frame the panel (the `frame-ancestors` policy). |
+| `REQUIRE_VOBIZ_SIGNATURE` | No | `false` | `true` refuses any webhook that arrives without a Vobiz signature. Signed webhooks are always checked. |
+| `INBOUND_RING_SECONDS` | No | `45` | How long an inbound call rings the panels before voicemail. For SIP direct, how long the endpoint rings. |
+| `OUTBOUND_RING_SECONDS` | No | `45` | How long an outbound destination rings before the call is given up. |
+| `SESSION_HOURS` | No | `12` | How long a panel sign-in lasts before the agent signs in again. |
+| `VOBIZ_API_BASE` | No | `https://api.vobiz.ai` | The Vobiz API address. Leave unset unless Vobiz support tells you otherwise. |
 
-Two Salesforce-specific notes:
+### Panel (CTI Adapter URL parameters)
 
-- **Scope your Trusted URL** to the exact origin serving the panel. A wildcard is
-  convenient during development and broader than you want in production.
-- **The adapter URL is visible to any admin** and travels in the frame's address.
-  Keep secrets out of it — the parameters this app accepts are all non-sensitive
-  by design.
+Salesforce has no settings screen for an Open CTI panel, so its settings are
+query parameters on the **CTI Adapter URL**. Type a plain `&` between them in
+Salesforce (the `&amp;` in the XML file is only XML escaping).
+
+| Parameter | Required | Default | Meaning |
+|---|---|---|---|
+| `org` | **Yes** | Derived from the page framing the panel | Your My Domain URL, e.g. `https://your-org.my.salesforce.com`. The panel loads Salesforce's Open CTI toolkit from it, and accepts only Salesforce hosts. |
+| `agentId` | **Yes** | — | This agent's identity: 1–40 letters, digits, `-` or `_`. Different for every agent on the same Vobiz account. |
+| `backendUrl` | No | The address the panel was served from | Only for a backend you build yourself that runs on a different origin from the panel. Leave unset with the included backend, which accepts requests only from its own origin. |
+| `registrarUrl` | No | `wss://registrar.vobiz.ai:5063/` | The Vobiz SIP registrar. Must be a `wss://` address on `vobiz.ai`. Leave unset unless Vobiz support tells you otherwise. |
+| `apiVersion` | No | `64.0` | The Open CTI API version to load, such as `62.0`. |
+
+---
+
+## Deploying to production
+
+- **HTTPS on a stable hostname.** Salesforce stores the adapter URL and Vobiz
+  stores the answer URLs, all built from `PUBLIC_BASE_URL`. If the hostname
+  changes, update `PUBLIC_BASE_URL`, the Call Center adapter URLs and the
+  Trusted URL, and have agents sign in again (the backend then finds or creates
+  a `VobizSF` application for the new address). Point any SIP direct
+  applications at the new address yourself.
+- **Run one instance.** Sessions, signed-in accounts and calls in progress are
+  held in the memory of one process. Do not run several instances behind a
+  load balancer.
+- **Restarts sign everyone out.** After a restart or redeploy, every agent signs
+  in again. Until someone from an account has, that account's outbound calls
+  are refused and its inbound callers hear "this number cannot take calls right
+  now". Deploy outside working hours.
+- **Keep `DATA_DIR` on persistent storage.** It holds `endpoints.json` (endpoint
+  ids and usernames, no passwords or tokens). If it is lost, the backend finds
+  each agent's endpoint again by its alias, so this is a convenience rather than
+  a hard requirement — but keep it, and keep it private.
+- **Require signed webhooks** once you have confirmed your Vobiz account signs
+  them: `REQUIRE_VOBIZ_SIGNATURE=true`.
+- **Keep the process running** with your platform's service manager (systemd, a
+  container restart policy, or similar). `GET /healthz` returns `{"ok":true}`
+  for health checks.
+- **Salesforce side.** Nothing to package or upload. Scope the Trusted URL to
+  your exact backend origin, not a wildcard, and create one Call Center per
+  agent.
+
+---
+
+## Security and privacy
+
+- **Your Auth Token never reaches the browser and is never stored on disk.**
+  The agent types it once; the backend uses it to call Vobiz, keeps it in
+  memory only, and never logs it or sends it back.
+- **What the backend stores on disk:** only `DATA_DIR/endpoints.json` — which
+  endpoint id and SIP username belong to which agent of which account. The file
+  is created readable by the server's user only. No passwords, tokens or call
+  data.
+- **What the browser receives:** the agent's SIP username and a SIP password
+  that is replaced on every sign-in, the account's phone numbers, and an
+  `HttpOnly` session cookie the panel's code cannot read. The SIP password goes
+  only to the Vobiz registrar.
+- **What the browser stores:** nothing on the Vobiz account tab. On the SIP
+  direct tab, only if the agent ticks **Remember these**: that endpoint's
+  username, password and caller ID, in this browser's local storage. Leave it
+  unticked on a shared computer.
+- **Requests from other sites are refused.** The backend accepts panel requests
+  only as JSON from its own origin and sends no CORS headers, so another web
+  page cannot use an agent's session.
+- **Only an agent's own phone line can spend their account.** The backend
+  places a call only for the SIP endpoint it gave to a signed-in agent, and only
+  on that agent's account.
+- **Webhook signatures.** Signed Vobiz webhooks (`X-Vobiz-Signature-V3`, or
+  `-V2`) are verified with the Auth Token of the account they belong to, and a
+  bad signature is refused. Set `REQUIRE_VOBIZ_SIGNATURE=true` to refuse
+  unsigned ones too. Webhooks for SIP direct calls cannot be verified, because
+  the backend holds no token for them.
+- **Only Salesforce can frame the panel**, through the `frame-ancestors`
+  policy (`SALESFORCE_FRAME_ANCESTORS`).
+- **Recordings are not served.** There are no recording links to leak; play
+  recordings in the Vobiz Console.
+- **The adapter URL is not secret.** Any Salesforce admin can read it, so it
+  carries no credentials by design. The panel checks every parameter on it:
+  `org` must be a Salesforce host, `registrarUrl` a Vobiz host, and a
+  `backendUrl` on another origin is only honoured inside Salesforce.
 
 To report a vulnerability, see [SECURITY.md](SECURITY.md).
 
 ---
 
-## Support and licence
+## Troubleshooting
 
-Built and maintained by **Vobiz**.
+Keep the browser's developer console open while you set up: every failure is
+logged there with a specific message.
+
+| Symptom | Cause | Fix |
+|---|---|---|
+| The phone panel is blank, or the console shows a `frame-src` error | The backend's origin is not a Trusted URL with `frame-src`, or the adapter URL is plain HTTP | Add the Trusted URL ([Quick start](#quick-start) step 5) and use `https://` |
+| No **Phone** item in the utility bar | The user is not assigned to the Call Center, or the utility item is missing | **Manage Call Center Users**; add **Open CTI Softphone** in App Manager |
+| A change to the adapter URL has no effect | Salesforce caches it | Hard-refresh: <kbd>Ctrl</kbd>+<kbd>Shift</kbd>+<kbd>R</kbd> |
+| "Salesforce org not known" | `org` is missing from the adapter URL, or is not a Salesforce host | Add `?org=https://your-org.my.salesforce.com` |
+| "Not configured — set the Backend URL and Agent Identity" | `agentId` is missing from the adapter URL | Add `&agentId=<agent>` |
+| "Cannot reach the calling backend" | The backend is down, or `backendUrl` points somewhere else | Check `https://calling.example.com/healthz`; remove `backendUrl` when using the included backend |
+| "Vobiz rejected that Auth ID and Auth Token" | Wrong or stale credentials | Copy both again from Console → API credentials. The Auth Token is not your login password |
+| "Logged in … this account has no phone numbers yet" and **Call** stays disabled | The account has no active, voice-enabled number | Buy or activate a number in the Vobiz Console, then log in again |
+| The badge is green but calls end with "Please sign in to the softphone again" | The backend restarted, or the session expired (`SESSION_HOURS`) | Sign in again on the **Vobiz account** tab |
+| The call connects but there is no audio, and no microphone prompt appeared | Salesforce is blocking the microphone in its frame | Tick **microphone** on the Trusted URL; if greyed out, set Session Settings → Browser Feature Permissions → Microphone to **Trusted URLs Only** first |
+| Inbound callers go straight to voicemail | No panel of that account was listening | Keep the Salesforce tab with the panel open and signed in; check the agent is not already on a call |
+| Inbound callers hear "this number cannot take calls right now" | Nobody from that account has signed in since the backend started, or (SIP direct) no agent is signed in with that number as **Calling from** | Have an agent sign in |
+| Inbound calls do not reach the panel at all | The number is not attached to the integration's application | Click **Enable inbound calls** (account sign-in), or attach the number to your application (SIP direct) |
+| SIP direct: "Vobiz rejected these credentials" | Wrong SIP username or password | Set a new password on the endpoint in the Console and use that |
+| SIP direct: calls fail as soon as they start | The endpoint is not attached to an application whose answer URL is `<PUBLIC_BASE_URL>/answer`, or **Calling from** is not a number on that account | Follow the [SIP direct](#sip-direct) setup |
+| Every call fails and the backend logs "signature invalid" | `PUBLIC_BASE_URL` does not match the address Vobiz was given | Set `PUBLIC_BASE_URL` to the exact public address, restart, and sign in again |
+| Calls take several seconds to connect | Many virtual network adapters (VPN, Docker) on the agent's machine | Disconnect unused VPNs or adapters |
+
+---
+
+## Limitations
+
+- **Sign in again after the backend restarts.** Sessions are held in memory.
+- **Run one backend instance.** State is not shared between processes.
+- **Two Vobiz call records (CDRs) per call**, one per leg, because every call
+  is a conference. Keep this in mind when you reconcile call records.
+- **One agent per Call Center.** More agents need more Call Center records.
+- **One Salesforce tab per agent** with the panel open.
+- **One inbound call per agent at a time.** A second caller while the agent is
+  ringing or on a call goes to voicemail; there is no queue.
+- **Browser calling only.** Calls cannot be sent to a mobile or desk phone.
+- **No hold, mute, transfer or conferencing** between agents.
+- **Calls are logged as Tasks**, not Salesforce Voice Call records (those
+  require Service Cloud Voice).
+- **No omnichannel presence.** The panel does not set agent availability.
+- **Recordings and voicemails are only in the Vobiz Console**, not in the panel
+  or in Salesforce.
+- **SIP direct:** no caller ID dropdown, no **Enable inbound calls**, and
+  inbound calls get no screen pop, no Task, no recording and no voicemail.
+- **Inbound is set up per number** from the currently selected caller ID; to
+  route several numbers, select each and click **Enable inbound calls** for
+  each.
+
+---
+
+## Development
+
+```bash
+npm test                      # the test suite; no Vobiz account or network needed
+npm run check-docs            # checks every link in the Markdown docs
+node --check backend/server.js   # syntax check; also app/softphone.js, app/opencti-host.js
+```
+
+There is no build step and no framework. Edit a file, restart the backend if
+you changed `backend/`, and hard-refresh Salesforce. CI runs the tests, the
+docs link check, an XML check of the Call Center definition, and a scan for
+committed credentials.
+
+| Path | What it is |
+|---|---|
+| `app/softphone.html`, `app/style.css` | The panel |
+| `app/softphone.js` | Sign-in, dialling, inbound ringing, screen pop and Task logging |
+| `app/opencti-host.js` | The Salesforce layer: loads Open CTI and checks the adapter URL parameters |
+| `app/lib/jssip.min.js` | The SIP library (JsSIP), included |
+| `backend/server.js` | The calling backend, which also serves the panel |
+| `backend/.env.example` | Configuration template |
+| `call-center/call-center-definition.xml` | The Call Center definition to import |
+| `docs/install.md` | The Salesforce setup, step by step |
+| `docs/architecture.md` | How the call flows work |
+| `docs/backend-contract.md` | Every endpoint the panel needs, for building your own backend |
+| `tests/` | The test suite |
+| `tools/check-docs.mjs` | The documentation link checker |
+
+To build your own backend instead of using `backend/`, implement
+[docs/backend-contract.md](docs/backend-contract.md), including its security
+requirements. See also [backend/README.md](backend/README.md) and
+[CONTRIBUTING.md](CONTRIBUTING.md).
+
+---
+
+## Support and links
+
+- Integration guide: https://www.vobiz.ai/docs/integrations/salesforce
+- Vobiz documentation: https://www.vobiz.ai/docs
+- Vobiz Console: https://console.vobiz.ai
+- Support: [support@vobiz.ai](mailto:support@vobiz.ai)
+- Security reports: [SECURITY.md](SECURITY.md)
+- Changes: [CHANGELOG.md](CHANGELOG.md)
 
 Licensed under the [MIT Licence](LICENSE), © 2026 Vobiz. This is an official
-Vobiz integration, not a Salesforce product; Salesforce, Lightning, Open CTI and
+Vobiz integration, not a Salesforce product. Salesforce, Lightning, Open CTI and
 Service Cloud are trademarks of Salesforce, Inc., used here only to describe
 compatibility.
-
-For anything about the Vobiz platform itself — accounts, numbers, billing —
-email [support@vobiz.ai](mailto:support@vobiz.ai) or read the
-[Vobiz documentation](https://www.vobiz.ai/docs).

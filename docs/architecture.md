@@ -94,13 +94,18 @@ Vobiz's own WebRTC playground does: `<Dial callerId="…"><Number>` out, and
 `<Dial callerId="<DID>"><User>sip:<user>@registrar.vobiz.ai</User>` in, which
 the panel's JsSIP stack answers directly. The panel's SIP User-Agent is a single
 token for exactly this reason: a space in it stops Vobiz delivering a
-`<Dial><User>` call. This path has not been verified with a live call from this
-repository.
+`<Dial><User>` call.
+
+Because these inbound calls ring the endpoint directly rather than through the
+backend's offer, they are not screen-popped, logged as a Task, recorded, or sent
+to voicemail.
 
 ## An inbound call
 
-Vobiz cannot deliver a call *into* a registered WebRTC endpoint, so the panel is
-never rung. The flow is inverted instead:
+For an agent signed in with a Vobiz account, the panel is never rung directly.
+The caller waits in a conference room and the panel joins it, which is what
+lets the backend offer the call to every open panel of the account, pop the
+record while it rings, and fall back to voicemail. The flow:
 
 1. A call reaches your Vobiz number and hits the backend's `/inbound-answer`.
 2. The backend parks the caller in a conference room playing hold audio, with
@@ -147,3 +152,5 @@ bindTrack(session.connection);   // no-op on the incoming path
   objects, which require Service Cloud Voice.
 - **One agent per Call Center definition.** A second agent needs a second
   definition with a different `agentId`.
+- **In-memory state.** The reference backend keeps sessions in one process;
+  after a restart, agents sign in again.

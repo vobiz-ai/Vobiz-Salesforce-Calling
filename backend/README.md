@@ -51,11 +51,6 @@ Nothing until an agent acts:
 | The panel then asks for its phone line | One Application per account, named `VobizSF`, found by its answer URL (`<PUBLIC_BASE_URL>/answer`) or created. An application with any other answer URL is never touched. Then one SIP endpoint per agent, alias `vobiz-sf-<agentId>`, found from the endpoint map or by alias, or created. Every sign-in sets the endpoint a fresh random password, which only that agent's browser session receives. The endpoint is bound to the application with `{"app_id":"<id>"}`, read back with `GET /Endpoint/{id}/`, and if that did not take, bound again with the documented `{"application": <id>}`. |
 | The agent clicks **Enable inbound calls** | One Application per account named `VobizSF_in`, answer URL `<PUBLIC_BASE_URL>/inbound-answer`, and the agent's selected number attached to it. **This moves that number off whichever application it was on** — the dropdown shows that application's id, and the result says it again. Nothing else ever attaches a number. |
 
-Application ids are 17 digits, larger than JavaScript can hold as a number.
-The backend never turns one into a number: ids are read out of responses as
-strings, and the one request body that carries an integer has the digits
-spliced into its text.
-
 **What is kept where.** Each account's Auth Token is held in memory only,
 keyed by Auth ID, for as long as the process runs. It is never returned to a
 browser, logged, or written to disk. The only file the backend writes is
@@ -113,7 +108,8 @@ Then:
   made. Vobiz itself refuses a caller ID the endpoint's account does not own.
 - **Inbound**: a call to the typed number is answered with
   `<Dial callerId="<that number>"><User>sip:<user>@registrar.vobiz.ai</User></Dial>`,
-  and rings the panel directly.
+  and rings the panel directly. These calls are not screen-popped, logged as a
+  Task, recorded, or sent to voicemail.
 - **Not available**: the number list and **Enable inbound calls**, which need
   the account API. The panel says "Sign in with your Vobiz account to use
   this."
@@ -171,6 +167,6 @@ This is a reference, built to be read and adapted. Before real traffic:
 npm test
 ```
 
-`tests/backend.test.mjs` drives every route against a fake Vobiz API — sign-in,
-provisioning, both call directions, and the requests an attacker would send. It
-does not place real calls.
+`tests/backend.test.mjs` covers every route — sign-in, provisioning, both call
+directions, and requests the backend must refuse. It needs no Vobiz account or
+network access.
