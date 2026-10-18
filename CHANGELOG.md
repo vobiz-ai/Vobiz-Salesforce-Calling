@@ -3,6 +3,33 @@
 Notable changes to this app. This project follows
 [Semantic Versioning](https://semver.org/).
 
+## [1.1.0]
+
+### Added
+- **A reference calling backend** in `backend/`: one dependency-free Node.js
+  file that implements the whole backend contract, serves the panel, and meets
+  the contract's security requirements. The panel no longer needs a backend
+  written before the first call.
+- **A test suite** (`npm test`), run in CI.
+
+### Fixed
+- **Screen-pop now happens when the call starts.** It used to run only after
+  the call ended. An inbound caller's record opens while the panel rings; a
+  click-to-dial keeps the record that was clicked.
+- **Calls matched to an Account are logged.** The Task put every match in
+  `WhoId`, which Salesforce rejects for anything but a Contact or Lead.
+- **`?apiVersion=`, `?backendUrl=` and `?registrarUrl=` are validated**, like
+  `?org=` already was. A crafted `apiVersion` could load a script from any path
+  on a Salesforce host; a crafted `backendUrl` or `registrarUrl` could send what
+  an agent typed to another server.
+- Leftover names from the panel this was ported from: the SIP User-Agent, the
+  `platform` sent to `/setup-inbound`, and the dial step's help text.
+
+### Changed
+- `docs/backend-contract.md` drops endpoints the panel never calls
+  (`/start-call`, `/call-status`, `/recordings`, `/recording-audio`), and its
+  security requirements now match what the panel can actually do.
+
 ## [1.0.0]
 
 First public release.
