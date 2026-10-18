@@ -25,8 +25,9 @@ Two reasons, both non-negotiable:
 
 ## Base URL
 
-Everything below is relative to the origin that served the panel, or to the
-adapter URL's `?backendUrl=` when the panel is hosted elsewhere. The app
+Everything below is relative to the origin that served the panel. **Serve
+`app/` from your backend**: there is no setting to point the panel at another
+origin, because its cookie-authenticated JSON requests are same-origin only. The app
 requires HTTPS (plain `http://localhost` is allowed for development) and strips
 trailing slashes.
 
@@ -157,6 +158,32 @@ A caller waiting:
 > call arrives and nothing has polled for this agent recently, send the caller
 > to voicemail immediately instead of holding them for an agent who is not
 > there. A grace window of about five missed ticks works well.
+
+### `GET /call-state/{agentId}`
+
+Polled once a second **during** a call, and once more as it ends. Unlike
+`/inbound-pending` it is not presence: polling it must not make an agent on a
+call look free to ring. It changes no state.
+
+```json
+{
+  "now": 1760000000000,
+  "outbound": { "to": "+910000000099", "placedAt": 1759999990000, "answeredAt": 1759999995000, "endedAt": null },
+  "directInbound": { "from": "+910000000098", "to": "+910000000004", "at": 1759999980000 }
+}
+```
+
+- `outbound` is the agent's latest outbound call. `answeredAt` is when the
+  **destination** answered, not when the agent's own leg connected, which
+  happens while the destination is still ringing. The panel logs talk time from
+  it, and logs a call with no `answeredAt` as 0 seconds, *No answer*.
+- `directInbound` is the latest call rung on a SIP-direct endpoint, with the
+  real caller's number (see [`/inbound-answer`](#getpost-inbound-answer)).
+- Times are milliseconds on the backend's clock; `now` lets the panel correct
+  for the difference from its own.
+
+Optional: when this returns anything other than `200` with a numeric `now`, the
+panel times calls from its own leg connecting, which includes ring time.
 
 ### `POST /inbound-accept`
 
@@ -290,8 +317,11 @@ number selected in the session. Never a number from configuration.
 
 **SIP direct.** A SIP user signed in through `/sip-direct` has no account
 credentials behind it, so there is no REST call to make: answer with
-`<Dial callerId="<caller ID>"><Number>…</Number></Dial>` and let Vobiz refuse a
-caller ID the account does not own.
+`<Dial callerId="<caller ID>" callbackUrl="…/dial-event?leg=<CallUUID>"><Number>…</Number></Dial>`
+and let Vobiz refuse a caller ID the account does not own. The `callbackUrl`'s
+`DialAnswer` event is when the destination answered: record it for
+[`/call-state`](#get-call-stateagentid). The browser's leg is answered by this
+XML, before anyone picks up.
 
 **An `Event=Hangup` request is not a request for instructions.** Answer it with
 an empty `<Response></Response>`; returning call-control XML originates a fresh
@@ -330,7 +360,8 @@ The `callbackUrl` above. Vobiz posts `ConferenceAction` (`enter` / `exit`),
 Three things belong here:
 
 - **The second `enter` on an outbound room is the destination answering.** That
-  is what cancels your no-answer timer. Nothing in the `<Conference>` attributes
+  is what cancels your no-answer timer, and (with the `/outbound-join` fetch,
+  whichever comes first) what `/call-state` reports as `answeredAt`. Nothing in the `<Conference>` attributes
   expresses "give up if the second member never arrives", so bound it yourself —
   otherwise an unanswered call leaves the agent waiting until `timeLimit`.
 - **The room emptying is the definitive end of an outbound call.** There is no
@@ -338,6 +369,12 @@ Three things belong here:
   when a dial finished belongs here.
 - **An `exit` on an inbound room** means the caller gave up. A browser leg still
   on its way should then be refused rather than dialling them back.
+
+### `GET|POST /dial-event`
+
+The SIP-direct `<Dial>` `callbackUrl`. `DialAction=answer` (`Event=DialAnswer`)
+marks the call answered for `/call-state`; `hangup` marks it ended. Return an
+empty `<Response></Response>`.
 
 ### `GET|POST /dial-status`
 
@@ -353,7 +390,11 @@ webhook's `ParentAuthID` names the account; fall back to matching the dialled
 `To` against signed-in accounts' numbers. Ring that account's open panels, and
 no other account's. If nobody is signed in for it, a short `<Speak>` and
 `<Hangup/>`, and a log line. If the number belongs to a SIP-direct sign-in,
-answer `<Dial callerId="<To in E.164>"><User>sip:<user>@registrar.vobiz.ai</User></Dial>`.
+answer `<Dial callerId="<To in E.164>" callerName="<caller's digits>"><User>sip:<user>@registrar.vobiz.ai</User></Dial>`.
+`callerId` must be the DID, because Vobiz refuses a `<User>` leg whose caller ID
+the account does not own, so the caller's number goes in `callerName` and
+reaches the panel as the INVITE's display name. Keep it for `directInbound` in
+[`/call-state`](#get-call-stateagentid) too.
 
 Otherwise park the caller in a room of their own and follow it with voicemail:
 

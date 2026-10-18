@@ -72,7 +72,6 @@ first, under Setup → **Session Settings** → **Browser Feature Permissions**.
    |---|---|---|
    | `org` | yes | Your My Domain host. Open CTI is served per-org; there is no CDN copy. |
    | `agentId` | yes | Which identity this call centre registers as. **Every agent on one Vobiz account needs a different value.** |
-   | `backendUrl` | no | Defaults to wherever the panel is served from. |
    | `apiVersion` | no | Open CTI version, default `64.0`. |
 
    With the reference backend the URL is
@@ -131,7 +130,7 @@ direct** tabs, and numbered steps.
 | **"Salesforce org not known"** | `?org=` is missing from the adapter URL and could not be derived. |
 | **"Not configured"** | `&agentId=` is missing. |
 | **"Sign in below to bring your phone line online."** | Normal before the first sign-in. Sign in on the Vobiz account tab. |
-| **"Cannot reach the calling backend"** | The backend is down, or `backendUrl` points at another origin. With the included backend, leave `backendUrl` unset. |
+| **"Cannot reach the calling backend"** | The backend is down, or the panel is not being served by the backend. The panel only talks to the origin it was loaded from. |
 | The backend's address changed | Update `PUBLIC_BASE_URL`, the adapter URL and the Trusted URL, restart the backend, and sign in again. |
 | A call ends with "Please sign in to the softphone again" | The backend restarted or the session expired. Sign in again. |
 | Panel loads, no phone icon | The user is not assigned — step 3. |

@@ -107,9 +107,9 @@ Then:
   `<Dial callerId="<typed number>"><Number>…</Number></Dial>`. No REST call is
   made. Vobiz itself refuses a caller ID the endpoint's account does not own.
 - **Inbound**: a call to the typed number is answered with
-  `<Dial callerId="<that number>"><User>sip:<user>@registrar.vobiz.ai</User></Dial>`,
-  and rings the panel directly. These calls are not screen-popped, logged as a
-  Task, recorded, or sent to voicemail.
+  `<Dial callerId="<that number>" callerName="<caller's number>"><User>sip:<user>@registrar.vobiz.ai</User></Dial>`,
+  and rings the panel directly. The caller's record pops and the call is
+  logged as a Task; these calls are not recorded or sent to voicemail.
 - **Not available**: the number list and **Enable inbound calls**, which need
   the account API. The panel says "Sign in with your Vobiz account to use
   this."

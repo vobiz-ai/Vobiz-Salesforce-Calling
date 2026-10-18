@@ -101,8 +101,20 @@ function freshState() {
     inboundCalls: new Map(),
     /** agent key -> { room, from, callUuid, at, callerGone } */
     joinExpected: new Map(),
-    /** outbound room -> { authId, agentKey, agentLeg, legs: Set, answered, closed, timer } */
+    /** outbound room -> { authId, agentKey, agentLeg, legs: Set, answered, closed, timer, call } */
     outboundRooms: new Map(),
+    /**
+     * agent key -> the agent's most recent outbound call, as /call-state reports
+     * it: { to, placedAt, answeredAt, endedAt }. The panel's own leg is
+     * connected from the moment it reaches the room (or the SIP-direct <Dial>),
+     * so only the backend knows when the DESTINATION answered — which is when
+     * talk time starts.
+     */
+    lastOutbound: new Map(),
+    /** SIP direct outbound: the browser leg's CallUUID -> that call's entry in lastOutbound. */
+    directOutbound: new Map(),
+    /** agent key -> the most recent call rung on a SIP-direct endpoint: { from, to, callUuid, at }. */
+    lastDirectInbound: new Map(),
     /** endpoint map loaded from disk: { dir, map: { "<authId>:<agentId>": { endpointId, username } } } */
     endpointStore: null,
   };
@@ -660,6 +672,22 @@ async function handleSipDirect(cfg, req, res) {
   sendJson(res, 200, { sipUser: user, callerId: number }, { "Set-Cookie": sessionCookie(cfg, sid, maxAge) });
 }
 
+/** Start tracking an outbound call for /call-state, replacing the agent's previous one. */
+function trackOutbound(key, to) {
+  const call = { to: toE164(to), placedAt: Date.now(), answeredAt: null, endedAt: null };
+  state.lastOutbound.set(key, call);
+  return call;
+}
+
+/** The destination answered. The first signal wins; later ones are the same answer. */
+function markAnswered(call) {
+  if (call && !call.answeredAt && !call.endedAt) call.answeredAt = Date.now();
+}
+
+function markEnded(call) {
+  if (call && !call.endedAt) call.endedAt = Date.now();
+}
+
 /** The live SIP-direct entry for a SIP username, if any. */
 function sipDirectFor(user) {
   const entry = state.sipDirect.get(user);
@@ -764,6 +792,31 @@ function handleInboundPending(cfg, req, res, agentId) {
   const p = state.pending.get(s.key);
   if (!p || p.state !== "ringing") return sendJson(res, 200, { pending: false });
   sendJson(res, 200, { pending: true, room: p.room, from: p.from, to: p.to, callUuid: p.callUuid });
+}
+
+/**
+ * What the panel needs to log a call correctly, and nothing that rings it.
+ *
+ * Separate from /inbound-pending on purpose: that poll is also the agent's
+ * presence, and an agent on a call must not look free to ring. This one is
+ * polled during a call and changes no state.
+ *
+ * Times are this server's clock; `now` is sent so the panel can correct for
+ * the difference between the two clocks rather than assume there is none.
+ */
+function handleCallState(cfg, req, res, agentId) {
+  const s = sessionFor(req, agentId);
+  if (!s) return sendJson(res, 401, { error: "Sign in first." });
+  const out = state.lastOutbound.get(s.key) || null;
+  const inbound = state.lastDirectInbound.get(s.key) || null;
+  sendJson(res, 200, {
+    now: Date.now(),
+    outbound: out ? { to: out.to, placedAt: out.placedAt, answeredAt: out.answeredAt, endedAt: out.endedAt } : null,
+    // SIP direct only: who is calling the endpoint right now. The browser is
+    // rung by <Dial><User> with the DID as caller ID, so this is how the panel
+    // learns the real caller if the INVITE's display name does not carry it.
+    directInbound: inbound ? { from: inbound.from, to: inbound.to, at: inbound.at } : null,
+  });
 }
 
 /** Withdraw an inbound offer from every panel it rang on. */
@@ -887,9 +940,15 @@ async function handleInboundAnswer(cfg, req, res, url, parsed) {
     const direct = sipDirectForNumber(to);
     if (direct) {
       const did = normalizeDid(to);
+      // callerId has to be the DID: Vobiz refuses a <User> leg whose caller ID
+      // the account does not own, and the caller's number is not ours. So the
+      // caller's number travels as callerName — the INVITE's display name —
+      // and is also kept for /call-state, in case the display name is lost.
+      const callerNumber = toE164(from);
+      state.lastDirectInbound.set(direct.session.key, { from: callerNumber, to: did, callUuid, at: Date.now() });
       log(`inbound from ${from} to ${did} — ringing SIP direct user ${direct.user}`);
       return sendXml(res, `<Response>
-  <Dial callerId="${escapeXml(did)}" timeout="${cfg.inboundRingSeconds}" action="${escapeXml(`${cfg.publicBaseUrl}/dial-status`)}" method="POST" redirect="false">
+  <Dial callerId="${escapeXml(did)}"${callerNumber ? ` callerName="${escapeXml(digitsOnly(callerNumber))}"` : ""} timeout="${cfg.inboundRingSeconds}" action="${escapeXml(`${cfg.publicBaseUrl}/dial-status`)}" method="POST" redirect="false">
     <User>${escapeXml(`sip:${direct.user}@registrar.vobiz.ai`)}</User>
   </Dial>
 </Response>`);
@@ -950,8 +1009,11 @@ async function handleAnswer(cfg, req, res, url) {
     for (const [room, r] of state.outboundRooms) {
       if (r.agentLeg !== callUuid) continue;
       if (!webhookAllowed(cfg, req, url, accountCreds(r.authId))) break;
+      markEnded(r.call);
       if (!r.answered) { r.closed = true; endConference(cfg, accountCreds(r.authId), room); }
     }
+    const directCall = state.directOutbound.get(callUuid);
+    if (directCall) { markEnded(directCall); state.directOutbound.delete(callUuid); }
     return sendXml(res, EMPTY);
   }
 
@@ -975,9 +1037,21 @@ async function handleAnswer(cfg, req, res, url) {
       return sendXml(res, `<Response><Speak>That number could not be dialled.</Speak><Hangup/></Response>`);
     }
     const callerId = headerCli || direct.callerId;
+    // The browser's leg is answered by this XML, before <Dial> rings anyone, so
+    // the panel cannot tell ringing from talking. The Dial callbackUrl's
+    // DialAnswer event can, and /call-state passes it on.
+    if (!state.directOutbound.has(callUuid)) {
+      // One call per agent is tracked; drop the previous one's leg so the map
+      // cannot grow when no hangup notification ever reaches this backend.
+      const previous = state.lastOutbound.get(direct.session.key);
+      for (const [leg, c] of state.directOutbound) if (c === previous) state.directOutbound.delete(leg);
+      state.directOutbound.set(callUuid, trackOutbound(direct.session.key, to));
+    }
     log(`SIP direct ${caller}: dialling ${to} from ${callerId}`);
+    const events = `${cfg.publicBaseUrl}/dial-event?leg=${encodeURIComponent(callUuid)}`;
     return sendXml(res, `<Response>
-${recordTag(cfg, record)}  <Dial callerId="${escapeXml(callerId)}" timeout="${cfg.outboundRingSeconds}" timeLimit="14400" action="${escapeXml(`${cfg.publicBaseUrl}/dial-status`)}" method="POST" redirect="false">
+${recordTag(cfg, record)}  <Dial callerId="${escapeXml(callerId)}" timeout="${cfg.outboundRingSeconds}" timeLimit="14400" action="${escapeXml(`${cfg.publicBaseUrl}/dial-status`)}" method="POST" redirect="false"
+    callbackUrl="${escapeXml(events)}" callbackMethod="POST">
     <Number>${escapeXml(to)}</Number>
   </Dial>
 </Response>`);
@@ -1026,11 +1100,15 @@ ${recordTag(cfg, record)}  <Dial callerId="${escapeXml(callerId)}" timeout="${cf
     // Vobiz can fetch an answer URL twice for one call; do not dial twice.
     return sendXml(res, xmlAgentWaits(cfg, room, record));
   }
-  const r = { authId: session.authId, agentKey: session.key, agentLeg: callUuid, legs: new Set(), answered: false, closed: false, timer: null };
+  const r = {
+    authId: session.authId, agentKey: session.key, agentLeg: callUuid, legs: new Set(), answered: false, closed: false, timer: null,
+    call: trackOutbound(session.key, to),
+  };
   r.timer = setTimeout(() => {
     if (r.answered || r.closed) return;
     log(`outbound ${room}: ${to} did not answer — ending the room`);
     r.closed = true;
+    markEnded(r.call);
     endConference(cfg, accountCreds(r.authId), room);
   }, (cfg.outboundRingSeconds + 5) * 1000).unref();
   state.outboundRooms.set(room, r);
@@ -1048,10 +1126,12 @@ ${recordTag(cfg, record)}  <Dial callerId="${escapeXml(callerId)}" timeout="${cf
     if (result.ok) { log(`outbound ${room}: dialling ${to} from ${callerId} (${session.authId})`); return; }
     warn(`outbound ${room}: Vobiz refused to dial ${to}: ${result.status} ${JSON.stringify(result.json).slice(0, 200)}`);
     r.closed = true;
+    markEnded(r.call);
     endConference(cfg, accountCreds(r.authId), room);
   }).catch(err => {
     warn(`outbound ${room}: ${err.message}`);
     r.closed = true;
+    markEnded(r.call);
     endConference(cfg, accountCreds(r.authId), room);
   });
 
@@ -1064,6 +1144,9 @@ async function handleOutboundJoin(cfg, req, res, url) {
   if (!r || !webhookAllowed(cfg, req, url, accountCreds(r.authId))) return sendXml(res, HANGUP);
   // The agent gave up while this phone was ringing: do not seat them in an empty room.
   if (r.closed) return sendXml(res, HANGUP);
+  // Vobiz fetches this answer URL when the destination picks up, so this is
+  // the moment talk time starts. The conference "enter" below confirms it.
+  markAnswered(r.call);
   sendXml(res, xmlDestinationJoins(cfg, room));
 }
 
@@ -1074,6 +1157,7 @@ async function handleOutboundHangup(cfg, req, res, url) {
     // Busy, rejected or unanswered: release the agent rather than leave them waiting.
     log(`outbound ${room}: destination leg ended before answering — releasing the agent`);
     r.closed = true;
+    markEnded(r.call);
     endConference(cfg, accountCreds(r.authId), room);
   }
   sendXml(res, EMPTY);
@@ -1096,6 +1180,7 @@ async function handleConfEvent(cfg, req, res, url) {
       r.legs.add(leg || role);
       if (r.legs.size >= 2 && !r.answered) {
         r.answered = true;
+        markAnswered(r.call);
         if (r.timer) clearTimeout(r.timer);
         log(`outbound ${room}: answered`);
       }
@@ -1104,6 +1189,7 @@ async function handleConfEvent(cfg, req, res, url) {
       if (r.legs.size === 0) {
         if (r.timer) clearTimeout(r.timer);
         state.outboundRooms.delete(room);
+        markEnded(r.call);
         log(`outbound ${room}: call over`);
       }
     }
@@ -1117,6 +1203,33 @@ async function handleConfEvent(cfg, req, res, url) {
     if (j && j.room === room) j.callerGone = true;
     state.inboundRooms.delete(room);
   }
+  sendXml(res, EMPTY);
+}
+
+/**
+ * <Dial> lifecycle events for a SIP-direct outbound call. DialAnswer is the
+ * destination picking up; DialHangup is it going away. There are no account
+ * credentials behind a SIP-direct call, so like its /answer this cannot be
+ * signature-checked — the worst a forged event can do is move one call log's
+ * start time.
+ */
+async function handleDialEvent(cfg, req, res, url) {
+  const body = await webhookFields(req, url);
+  const leg = url.searchParams.get("leg") || field(body, "DialALegUUID") || field(body, "CallUUID");
+  const call = state.directOutbound.get(leg);
+  const event = (field(body, "DialAction") || field(body, "Event")).toLowerCase();
+  if (call) {
+    if (event === "answer" || event === "dialanswer" || event === "connected" || event === "dialconnected") markAnswered(call);
+    else if (event === "hangup" || event === "dialhangup") markEnded(call);
+  }
+  sendXml(res, EMPTY);
+}
+
+/** The <Dial> action: the Dial is over, whichever way it went. Nothing to say back. */
+async function handleDialStatus(cfg, req, res, url) {
+  const body = await webhookFields(req, url);
+  const call = state.directOutbound.get(field(body, "CallUUID"));
+  if (call) markEnded(call);
   sendXml(res, EMPTY);
 }
 
@@ -1166,6 +1279,7 @@ function createServer(cfg = config()) {
       if (m === "POST" && p === "/inbound-accept") return await handleInboundAccept(cfg, req, res);
       if (m === "POST" && p === "/inbound-decline") return await handleInboundDecline(cfg, req, res);
       if (m === "POST" && p === "/inbound-hangup") return await handleInboundHangup(cfg, req, res);
+      if (m === "GET" && p.startsWith("/call-state/")) return handleCallState(cfg, req, res, tail("/call-state/"));
 
       // Webhooks
       if (p === "/answer") return await handleAnswer(cfg, req, res, url);
@@ -1173,7 +1287,8 @@ function createServer(cfg = config()) {
       if (p === "/outbound-join") return await handleOutboundJoin(cfg, req, res, url);
       if (p === "/outbound-hangup") return await handleOutboundHangup(cfg, req, res, url);
       if (p === "/conf-event") return await handleConfEvent(cfg, req, res, url);
-      if (p === "/dial-status") return sendXml(res, EMPTY);
+      if (p === "/dial-status") return await handleDialStatus(cfg, req, res, url);
+      if (p === "/dial-event") return await handleDialEvent(cfg, req, res, url);
       if (p === "/conf-wait") return sendXml(res, `<Response><Speak>Please hold while we connect you.</Speak><Wait length="8"/></Response>`);
       if (p === "/outbound-wait") return sendXml(res, `<Response><Wait length="3"/></Response>`);
 

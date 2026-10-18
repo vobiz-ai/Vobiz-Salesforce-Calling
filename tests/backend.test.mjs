@@ -421,6 +421,48 @@ test("outbound: an unanswered destination releases the agent", async () => {
   assert.doesNotMatch(late, /<Conference/);
 });
 
+test("call state: talk time starts when the destination answers, not when the agent's leg connects", async () => {
+  const { cookie, agent } = await signIn();
+  assert.equal((await panel("/call-state/agent-one")).status, 401, "needs the agent's session");
+  await webhook("/answer", { CallUUID: "tt-1", From: `sip:${agent.sipUser}`, To: DEST });
+  // The agent's leg is in the room: connected, but nobody has answered.
+  await webhook("/conf-event?room=obtt1&role=agent", { ConferenceAction: "enter", CallUUID: "tt-1" });
+  let st = (await panel("/call-state/agent-one", { cookie })).json;
+  assert.equal(typeof st.now, "number");
+  assert.equal(st.outbound.to, DEST);
+  assert.equal(typeof st.outbound.placedAt, "number");
+  assert.equal(st.outbound.answeredAt, null);
+
+  await fetch(`${base}/outbound-join?room=obtt1`);
+  st = (await panel("/call-state/agent-one", { cookie })).json;
+  assert.ok(st.outbound.answeredAt >= st.outbound.placedAt, "answered when the destination's answer URL was fetched");
+  const answeredAt = st.outbound.answeredAt;
+  await webhook("/conf-event?room=obtt1&role=destination", { ConferenceAction: "enter", CallUUID: "dest-tt" });
+  await webhook("/conf-event?room=obtt1&role=destination", { ConferenceAction: "exit", CallUUID: "dest-tt" });
+  await webhook("/conf-event?room=obtt1&role=agent", { ConferenceAction: "exit", CallUUID: "tt-1" });
+  st = (await panel("/call-state/agent-one", { cookie })).json;
+  assert.equal(st.outbound.answeredAt, answeredAt, "the first answer signal wins");
+  assert.equal(typeof st.outbound.endedAt, "number");
+});
+
+test("call state: an unanswered destination is never marked answered", async () => {
+  const { cookie, agent } = await signIn();
+  await webhook("/answer", { CallUUID: "na-1", From: `sip:${agent.sipUser}`, To: DEST });
+  await webhook("/outbound-hangup?room=obna1", { CallUUID: "dest-na", HangupCause: "NO_ANSWER" });
+  await fetch(`${base}/outbound-join?room=obna1`);
+  const st = (await panel("/call-state/agent-one", { cookie })).json;
+  assert.equal(st.outbound.answeredAt, null);
+  assert.equal(typeof st.outbound.endedAt, "number");
+});
+
+test("call state: polling it is not presence, so an agent on a call is not rung", async () => {
+  const { cookie } = await signIn();
+  await panel("/setup-inbound", { method: "POST", cookie, body: { agentId: "agent-one" } });
+  await panel("/call-state/agent-one", { cookie });
+  const xml = await webhook("/inbound-answer", { CallUUID: "busy-1", From: "910000000098", To: "910000000001", ParentAuthID: A });
+  assert.match(xml, /leave a message/);
+});
+
 test("toll fraud: a forged /answer cannot dial out", async () => {
   await signIn();
   for (const from of ["sip:someone-else@registrar.vobiz.ai", "+910000000098"]) {
@@ -648,6 +690,29 @@ test("SIP direct: a call to the typed caller ID rings that endpoint", async () =
   const ring = await webhook("/answer", { CallUUID: "sd-in2", From: "910000000098", To: "910000000004", Direction: "inbound", ParentAuthID: "MA_TEST0009" });
   assert.match(ring, /<Dial callerId="\+910000000004"/);
   assert.match(ring, /<User>sip:deskphone01@registrar.vobiz.ai<\/User>/);
+});
+
+test("SIP direct: the real caller reaches the panel as callerName and through /call-state", async () => {
+  const { cookie } = await sipDirect();
+  const xml = await webhook("/inbound-answer", { CallUUID: "sd-cn", From: "+910000000098", To: "910000000004", Direction: "inbound" });
+  assert.match(xml, /<Dial callerId="\+910000000004" callerName="910000000098"/, "callerId stays the DID; the caller is the name");
+  const st = (await panel("/call-state/desk", { cookie })).json;
+  assert.equal(st.directInbound.from, "+910000000098");
+  assert.equal(st.directInbound.to, "+910000000004");
+});
+
+test("SIP direct: outbound talk time starts at DialAnswer", async () => {
+  const { cookie } = await sipDirect();
+  const xml = await webhook("/answer", { CallUUID: "sd-tt", From: "sip:deskphone01@registrar.vobiz.ai", To: `sip:${DEST}@registrar.vobiz.ai` });
+  assert.match(xml, new RegExp(`callbackUrl="${base.replace(/[.]/g, "\\.")}/dial-event\\?leg=sd-tt"`));
+  let st = (await panel("/call-state/desk", { cookie })).json;
+  assert.equal(st.outbound.answeredAt, null, "the browser's leg is answered by the XML; the destination is not");
+  await webhook("/dial-event?leg=sd-tt", { Event: "DialAnswer", DialAction: "answer", CallUUID: "sd-tt", DialBLegUUID: "b-1" });
+  st = (await panel("/call-state/desk", { cookie })).json;
+  assert.equal(typeof st.outbound.answeredAt, "number");
+  await webhook("/dial-status", { CallUUID: "sd-tt", DialStatus: "completed" });
+  st = (await panel("/call-state/desk", { cookie })).json;
+  assert.equal(typeof st.outbound.endedAt, "number");
 });
 
 test("SIP direct: an 11-digit 0-prefixed DID is normalised to +91 for the Dial caller ID", async () => {

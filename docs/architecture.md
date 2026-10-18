@@ -91,14 +91,30 @@ An agent signed in on the **SIP direct** tab gives the backend no account
 credentials, so neither the REST-dialled conference above nor the parked-caller
 flow below is possible for them. Their calls use plain XML instead, the way
 Vobiz's own WebRTC playground does: `<Dial callerId="…"><Number>` out, and
-`<Dial callerId="<DID>"><User>sip:<user>@registrar.vobiz.ai</User>` in, which
-the panel's JsSIP stack answers directly. The panel's SIP User-Agent is a single
-token for exactly this reason: a space in it stops Vobiz delivering a
-`<Dial><User>` call.
+`<Dial callerId="<DID>" callerName="<caller>"><User>sip:<user>@registrar.vobiz.ai</User>`
+in, which the panel's JsSIP stack answers directly. The panel's SIP User-Agent
+is a single token for exactly this reason: a space in it stops Vobiz delivering
+a `<Dial><User>` call.
 
-Because these inbound calls ring the endpoint directly rather than through the
-backend's offer, they are not screen-popped, logged as a Task, recorded, or sent
-to voicemail.
+Vobiz will not ring a SIP user with a caller ID the account does not own, so
+the inbound `<Dial>` presents the DID and carries the caller's number as
+`callerName`, which arrives as the INVITE's display name. The backend also
+remembers that caller and `GET /call-state` reports it, for when the display
+name does not arrive. The panel pops the caller's record while it rings and
+logs a Task when the call ends, as for any other call. These calls are not
+recorded and are not sent to voicemail.
+
+## Talk time
+
+The panel's own leg is answered before anyone else is on the line: on an
+account sign-in it is seated in the waiting room at once, and on SIP direct the
+answer XML answers it before `<Dial>` rings anyone. So the panel cannot time a
+conversation from its own leg. The backend can: the destination's answer URL
+(`/outbound-join`) is fetched when they pick up, the room's second `enter`
+confirms it, and for SIP direct the `<Dial>` callbackUrl reports `DialAnswer`.
+The panel polls `GET /call-state` during the call and logs talk time from that
+moment. A call the destination never answered is logged as 0 seconds, *No
+answer*.
 
 ## An inbound call
 

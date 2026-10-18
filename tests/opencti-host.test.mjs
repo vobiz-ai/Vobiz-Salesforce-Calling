@@ -58,16 +58,13 @@ test("?apiVersion= cannot walk out of the toolkit path", async () => {
   assert.equal(toolkit, "https://acme.my.salesforce.com/support/api/62.0/lightning/opencti_min.js");
 });
 
-test("?backendUrl= to another origin is ignored outside Salesforce", async () => {
-  const { iparams } = await load("org=acme.my.salesforce.com&backendUrl=https://evil.example");
-  assert.equal(iparams.backend_url, PANEL);
-});
-
-test("?backendUrl= is honoured when Salesforce frames the panel", async () => {
-  const { iparams } = await load("org=acme.my.salesforce.com&backendUrl=https://api.acme.example", {
-    framedBy: "https://acme.lightning.force.com/",
-  });
-  assert.equal(iparams.backend_url, "https://api.acme.example");
+test("?backendUrl= is not a parameter: the backend is always the panel's own origin", async () => {
+  for (const framedBy of [null, "https://acme.lightning.force.com/"]) {
+    for (const url of ["https://evil.example", "https://api.acme.example", `${PANEL}/other`]) {
+      const { iparams } = await load(`org=acme.my.salesforce.com&backendUrl=${encodeURIComponent(url)}`, { framedBy });
+      assert.equal(iparams.backend_url, PANEL, `${url} framed by ${framedBy}`);
+    }
+  }
 });
 
 test("?registrarUrl= must be a Vobiz wss:// registrar", async () => {

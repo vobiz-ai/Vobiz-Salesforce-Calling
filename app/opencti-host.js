@@ -133,46 +133,23 @@ async function openCti(method, args = {}) {
   });
 }
 
-/** True when Salesforce is the page framing this panel. */
-function framedBySalesforce() {
-  try {
-    if (window.top === window.self) return false;
-    return SALESFORCE_HOST.test(new URL(document.referrer).hostname);
-  } catch {
-    return false;
-  }
-}
-
 const DEFAULT_REGISTRAR = "wss://registrar.vobiz.ai:5063/";
 /** Vobiz's own registrars only. The SIP password is presented to this host. */
 const VOBIZ_REGISTRAR = /^wss:\/\/[a-z0-9.-]+\.vobiz\.ai(:\d+)?\/?$/i;
 
 /**
- * Where the agent's Auth Token and SIP password are sent.
+ * Where the agent's Auth Token and SIP password are sent: always the origin
+ * that served this page, which is the calling backend.
  *
- * The default — the origin that served this page — needs no checking. An
- * override does: a link carrying `backendUrl=https://evil.example` would
- * otherwise collect whatever the agent types into the sign-in form, on a page
- * that is genuinely yours. So an override is honoured only when Salesforce is
- * framing the panel, which is the one place an admin-set adapter URL is loaded.
+ * There is deliberately no parameter to point it elsewhere. The panel's
+ * requests are same-origin JSON authenticated by a session cookie, and the
+ * reference backend answers no CORS preflight, so a backend on another origin
+ * could never have answered them — and a parameter naming one only gave a
+ * crafted link somewhere to send what an agent types. Serve app/ from your
+ * backend instead.
  */
 function backendUrl() {
-  const own = window.location.origin;
-  const override = (PARAMS.get("backendUrl") || "").trim();
-  if (!override) return own;
-  let origin;
-  try {
-    origin = new URL(override).origin;
-  } catch {
-    console.error(`[Vobiz] ignoring backendUrl=${override} — not a URL`);
-    return own;
-  }
-  if (origin === own) return override;
-  if (!framedBySalesforce()) {
-    console.error(`[Vobiz] ignoring backendUrl=${override} — an override is only honoured inside Salesforce`);
-    return own;
-  }
-  return override;
+  return window.location.origin;
 }
 
 function registrarUrl() {
@@ -188,10 +165,7 @@ function registrarUrl() {
 const HOST = {
   iparams: {
     get: async () => ({
-      // Defaults to wherever this page was served from, which is the calling
-      // backend in the recommended setup — so the common case needs no
-      // parameter at all. Override with ?backendUrl= when hosting the panel
-      // somewhere other than the backend.
+      // Wherever this page was served from — the calling backend.
       backend_url: backendUrl(),
       agent_id: PARAMS.get("agentId") || "",
       registrar_url: registrarUrl(),

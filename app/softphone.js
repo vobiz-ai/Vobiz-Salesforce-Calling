@@ -25,7 +25,7 @@ let currentRTCSession = null;
 // Calling requires BOTH an account login (whose number/balance) and a live
 // SIP registration (where the audio lands). Tracking them separately matters:
 // gating the Call button on login alone lets an agent dial while SIP is down,
-// which rings the customer and then connects them to silence.
+// and the browser places every call itself, so there is nothing to place it with.
 let accountReady = false;
 let sipRegistered = false;
 // True only between an inbound leg arriving and it being accepted, declined or
@@ -350,15 +350,67 @@ function hangUp() {
  * used to pick up by itself, with no ring, no caller shown and no way to
  * refuse.
  */
+/**
+ * The caller's number on a call delivered straight to this endpoint.
+ *
+ * The display name comes first. Vobiz will not ring a SIP user with a caller ID
+ * the account does not own, so the backend's <Dial><User> presents the dialled
+ * DID in the From user — the agent's own number — and carries the real caller
+ * as callerName, which arrives as the display name.
+ */
 function callerOf(session) {
   try {
-    const uri = session && session.remote_identity && session.remote_identity.uri;
-    const user = uri && uri.user;
-    if (user) return String(user).startsWith("+") ? String(user) : `+${user}`;
-    return (session && session.remote_identity && session.remote_identity.display_name) || "unknown";
+    const identity = (session && session.remote_identity) || {};
+    const display = String(identity.display_name || "").trim();
+    if (/^\+?\d{6,15}$/.test(display)) return e164(display);
+    const user = identity.uri && identity.uri.user;
+    if (user && /^\+?\d{6,15}$/.test(String(user))) return e164(user);
+    return display || (user ? String(user) : "unknown");
   } catch {
     return "unknown";
   }
+}
+
+/**
+ * The backend's view of this agent's calls: when an outbound destination
+ * answered, and who is ringing a SIP-direct endpoint. Null when the backend
+ * does not offer it or cannot be reached — the panel then falls back to what
+ * it can see for itself.
+ */
+async function fetchCallState() {
+  if (!BACKEND_URL || !AGENT_ID) return null;
+  try {
+    const res = await backendFetch(`${BACKEND_URL}/call-state/${encodeURIComponent(AGENT_ID)}`);
+    if (!res.ok) return null;
+    const data = await res.json();
+    if (!data || typeof data.now !== "number") return null;
+    // Backend timestamps are its own clock. Shifted onto this one, so a skew
+    // between the two never turns into talk time.
+    const offset = Date.now() - data.now;
+    const local = t => (typeof t === "number" ? t + offset : null);
+    const out = data.outbound;
+    const inbound = data.directInbound;
+    return {
+      outbound: out ? { to: out.to, placedAt: local(out.placedAt), answeredAt: local(out.answeredAt), endedAt: local(out.endedAt) } : null,
+      directInbound: inbound ? { from: inbound.from, to: inbound.to, at: local(inbound.at) } : null,
+    };
+  } catch {
+    return null;
+  }
+}
+
+/**
+ * The real caller on a SIP-direct call, when the INVITE's display name did not
+ * carry it and all the From shows is the agent's own number.
+ */
+async function directCaller(shown) {
+  const own = e164(sipDirectCallerId());
+  if (shown !== "unknown" && e164(shown) !== own) return shown;
+  const state = await fetchCallState();
+  const inbound = state && state.directInbound;
+  // Only a ring the backend saw in the last minute is this one.
+  if (inbound && inbound.from && Date.now() - inbound.at < 60_000) return e164(inbound.from);
+  return shown;
 }
 
 function showIncoming(from) {
@@ -1077,26 +1129,13 @@ function startSipUA(sipUser, sipPassword, displayName) {
     setSipRegistered(false);
   });
 
-  // Vobiz dialing INTO this registered endpoint — the agent leg of a call
-  // our backend originated via the REST API (outbound bridge).
+  // A call delivered straight to this endpoint: a SIP-direct sign-in's number
+  // being rung by <Dial><User>. Account sign-ins are never rung this way —
+  // their inbound calls arrive through the conference poll above.
   ua.on("newRTCSession", data => {
     if (!isCurrent()) return;
     if (data.originator !== "remote") return;
-
-    currentRTCSession = data.session;
-    const caller = callerOf(currentRTCSession);
-
-    setStatus(`Incoming call from ${caller}`);
-    incomingPending = true;
-    showIncoming(caller);
-    startRingtone();
-
-    currentRTCSession.on("confirmed", () => setStatus("On a call"));
-    // The caller can give up, or Vobiz can time the leg out, while the banner
-    // is still on screen. Clear it either way rather than leaving an Accept
-    // button that answers a call which no longer exists.
-    currentRTCSession.on("ended", () => endIncoming(`Ready — registered as ${displayName}`));
-    currentRTCSession.on("failed", () => endIncoming(`Ready — registered as ${displayName}`));
+    receiveDirectCall(data.session, displayName);
   });
 
   ua.start();
@@ -1106,6 +1145,62 @@ function startSipUA(sipUser, sipPassword, displayName) {
     console.error("[Vobiz] navigator.mediaDevices is unavailable in this frame — inbound audio cannot work.");
     setStatus("No microphone access in this frame — calls will ring but cannot connect.");
   }
+}
+
+/**
+ * Ring for a call delivered straight to this endpoint, pop the caller's record
+ * while it rings, and file a Task when it ends — the same as any other call.
+ *
+ * Talk time runs from `confirmed`, which for this leg is the agent answering:
+ * the caller is already on the line by then. A call nobody answered is filed
+ * as missed, with no talk time.
+ */
+function receiveDirectCall(session, displayName) {
+  currentRTCSession = session;
+  let caller = callerOf(session);
+  let startedAt = null;
+  let declined = false;
+  let filed = false;
+
+  setStatus(`Incoming call from ${caller}`);
+  incomingPending = true;
+  showIncoming(caller);
+  startRingtone();
+
+  // Resolved first, then looked up, so the record pops while the panel rings.
+  const record = (authMode === "sip" ? directCaller(caller) : Promise.resolve(caller)).then(number => {
+    if (number !== caller) {
+      caller = number;
+      if (incomingPending && currentRTCSession === session) {
+        showIncoming(caller);
+        setStatus(`Incoming call from ${caller}`);
+      }
+    }
+    return findRecord(caller, true);
+  });
+
+  session.on("confirmed", () => {
+    startedAt = Date.now();
+    setStatus("On a call");
+  });
+  // Declining is the agent's own choice; anything else that ends an unanswered
+  // ring is a missed call.
+  const terminate = session.terminate && session.terminate.bind(session);
+  if (terminate) session.terminate = (...args) => { if (!startedAt) declined = true; return terminate(...args); };
+
+  const finish = () => {
+    // The caller can give up, or Vobiz can time the leg out, while the banner
+    // is still on screen. Clear it either way rather than leaving an Accept
+    // button that answers a call which no longer exists.
+    endIncoming(`Ready — registered as ${displayName}`);
+    if (filed) return;
+    filed = true;
+    const durationSec = startedAt ? (Date.now() - startedAt) / 1000 : 0;
+    const outcome = startedAt ? null : declined ? "Declined" : "Missed";
+    record.then(match => logCallToCrm({ number: caller, inbound: true, durationSec, record: match, outcome }));
+  };
+  session.on("ended", finish);
+  session.on("failed", finish);
 }
 
 /* ------------------------------------------------------------------ *
@@ -1170,8 +1265,11 @@ async function findRecord(number, inbound) {
  * `record` is the match found when the call started, so nothing is looked up
  * or popped again here.
  */
-async function logCallToCrm({ number, inbound, durationSec, record }) {
-  const subject = `Vobiz call ${inbound ? "from" : "to"} ${e164(number)}`;
+async function logCallToCrm({ number, inbound, durationSec, record, outcome = null }) {
+  // `outcome` names a call that never became a conversation — "No answer",
+  // "Missed", "Declined" — and goes in the subject, where an agent scanning
+  // Activity History sees it, and in CallDisposition, where reports can.
+  const subject = `Vobiz call ${inbound ? "from" : "to"} ${e164(number)}${outcome ? ` (${outcome.toLowerCase()})` : ""}`;
   // A Contact or Lead is the person on the call (WhoId); an Account, Case or
   // Opportunity is what the call was about (WhatId). Putting an Account id in
   // WhoId makes Salesforce reject the whole Task.
@@ -1185,7 +1283,8 @@ async function logCallToCrm({ number, inbound, durationSec, record }) {
         entityApiName: "Task",
         Subject: subject,
         CallType: inbound ? "Inbound" : "Outbound",
-        CallDurationInSeconds: Math.max(0, Math.round(durationSec || 0)),
+        CallDurationInSeconds: outcome ? 0 : Math.max(0, Math.round(durationSec || 0)),
+        ...(outcome ? { CallDisposition: outcome } : {}),
         Description: subject,
         Status: "Completed",
         ActivityDate: new Date().toISOString().slice(0, 10),
@@ -1242,6 +1341,63 @@ function onDialButtonClick() {
   placeCall(number);
 }
 
+/** How often the panel asks whether the destination has answered. */
+const CALL_STATE_POLL_MS = 1000;
+/** Slack for a backend that records the call a moment before the panel stamps it. */
+const PLACED_SLACK_MS = 5000;
+
+/**
+ * Talk time for an outbound call: from the destination answering, as the
+ * backend reports it, to the call ending.
+ *
+ * Polled once a second while the call is up, and once more as it ends so a
+ * short call is not missed between polls. Falls back to the panel's own
+ * connect time only when the backend offers no call state at all (a custom
+ * backend without /call-state) — never because the destination is slow.
+ */
+function outboundTalkClock(number, placedAt) {
+  let answeredAt = null;
+  let backendSpoke = false;
+  let connectedAt = null;
+  let timer = null;
+  const listeners = [];
+
+  const thisCall = out => out && out.placedAt !== null && out.placedAt >= placedAt - PLACED_SLACK_MS
+    && (!out.to || e164(out.to) === e164(number));
+
+  async function check() {
+    const state = await fetchCallState();
+    if (!state) return;
+    backendSpoke = true;
+    const out = state.outbound;
+    if (thisCall(out) && out.answeredAt && !answeredAt) {
+      answeredAt = out.answeredAt;
+      listeners.forEach(fn => fn());
+    }
+  }
+
+  return {
+    legConnected() {
+      connectedAt = Date.now();
+      if (!timer) timer = setInterval(check, CALL_STATE_POLL_MS);
+      check();
+    },
+    onAnswered(fn) { listeners.push(fn); },
+    stop() {
+      if (timer) clearInterval(timer);
+      timer = null;
+    },
+    async finish() {
+      this.stop();
+      const endedAt = Date.now();
+      if (!answeredAt) await check();
+      if (answeredAt) return { durationSec: Math.max(0, (endedAt - answeredAt) / 1000), outcome: null };
+      if (backendSpoke || !connectedAt) return { durationSec: 0, outcome: "No answer" };
+      return { durationSec: (endedAt - connectedAt) / 1000, outcome: null };
+    },
+  };
+}
+
 /**
  * Place an outbound call with this browser as the A leg.
  *
@@ -1272,6 +1428,7 @@ function placeCall(number, clicked = null) {
 
   // Vobiz routes a bare E.164 destination; the registrar is the SIP domain.
   const target = `sip:${String(number).replace(/[^\d+]/g, "")}@registrar.vobiz.ai`;
+  const placedAt = Date.now();
 
   try {
     const session = vobizUA.call(target, {
@@ -1295,21 +1452,26 @@ function placeCall(number, clicked = null) {
     // destination is still ringing.
     const record = clicked ? Promise.resolve(clicked) : findRecord(number, false);
 
-    let startedAt = null;
+    // This leg is confirmed the moment it reaches the waiting room, while the
+    // destination is still ringing — so `confirmed` is NOT when talking starts.
+    // The backend sees the destination answer, and the panel asks it.
+    const talk = outboundTalkClock(number, placedAt);
     session.on("progress", () => { if (numEl) numEl.textContent = `Ringing ${number}…`; });
     session.on("confirmed", () => {
-      startedAt = Date.now();
-      if (numEl) numEl.textContent = `On a call with ${number}`;
+      talk.legConnected();
+      if (numEl) numEl.textContent = `Ringing ${number}…`;
       setStatus("On a call");
     });
+    talk.onAnswered(() => { if (numEl) numEl.textContent = `On a call with ${number}`; });
     session.on("failed", e => {
+      talk.stop();
       const cause = (e && e.cause) || "unknown";
       if (numEl) numEl.textContent = `Call failed — ${cause}`;
       setStatus("Ready");
       currentRTCSession = null;
       setHangupVisible(false);
     });
-    session.on("ended", () => {
+    session.on("ended", async () => {
       if (numEl) {
         numEl.textContent = "Call ended";
         setTimeout(() => { numEl.hidden = true; }, 4000);
@@ -1317,8 +1479,8 @@ function placeCall(number, clicked = null) {
       setStatus("Ready");
       currentRTCSession = null;
       setHangupVisible(false);
-      const durationSec = startedAt ? (Date.now() - startedAt) / 1000 : 0;
-      record.then(match => logCallToCrm({ number, inbound: false, durationSec, record: match }));
+      const { durationSec, outcome } = await talk.finish();
+      record.then(match => logCallToCrm({ number, inbound: false, durationSec, record: match, outcome }));
     });
   } catch (err) {
     console.error("[Vobiz] Could not start the call:", err);

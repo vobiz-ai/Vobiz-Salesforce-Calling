@@ -43,8 +43,9 @@ If you are implementing that backend, note in particular:
 On the panel itself: the adapter URL's query string is untrusted, because anyone
 can send an agent a link to the panel. So `?org=` must name a Salesforce host
 and `?apiVersion=` must be a version number before the Open CTI toolkit is
-loaded from them; `?registrarUrl=` must be a Vobiz host; and a `?backendUrl=`
-on another origin is honoured only inside Salesforce. If you fork this, keep
+loaded from them; and `?registrarUrl=` must be a Vobiz host. There is no
+parameter for the backend's address: the panel only talks to the origin that
+served it. If you fork this, keep
 those checks — without them, a crafted link runs someone else's script on the
 origin serving the panel, or sends what an agent types to someone else's
 server. `tests/opencti-host.test.mjs` covers each one.
