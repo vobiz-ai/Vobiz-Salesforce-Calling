@@ -75,7 +75,12 @@ From the [Vobiz Console](https://console.vobiz.ai):
   presents no caller ID.
 - For **SIP direct**, a **SIP endpoint** with a username and password (Console →
   Voice → Endpoints). Save the password when you create it — Vobiz does not show
-  it again.
+  it again. Attach the endpoint and its number to an application whose answer
+  URL is your backend's `/answer` — see
+  [backend/README.md → SIP direct](backend/README.md#signing-in-with-sip-direct).
+
+None of these go into the backend's configuration. Agents type them into the
+panel, and any Vobiz account works.
 
 ### 3. A calling backend
 
@@ -134,18 +139,20 @@ Audio never touches your backend. It runs directly between the browser and Vobiz
 
 ### Signing in: two ways
 
-The panel offers two tabs. **They differ only in how the agent is identified.
-Once signed in, calling is identical** — same flow, same conference bridge, same
-everything.
+The panel offers two tabs, and **any Vobiz account works with either**. Nothing
+about an account is configured on the backend: no Auth ID, Auth Token, SIP
+credentials, caller ID or number in `.env`. Agents on different Vobiz accounts
+can use the same backend at the same time.
 
 | | **Vobiz account** tab | **SIP direct** tab |
 |---|---|---|
 | Agent enters | **Auth ID** and **Auth Token** | The endpoint's **SIP username** and **password** |
 | What it proves | Which Vobiz *account* pays for the call | Which *phone line* the browser is |
 | Where the SIP identity comes from | The backend provisions or looks one up | The agent supplies it directly |
-| Caller ID | Chosen from a dropdown of the account's numbers | Typed into **Calling from** |
-| Backend involvement at sign-in | Validates, returns the SIP identity | **None** — the browser registers directly |
-| What the browser holds | Account-wide credentials | One endpoint only |
+| Caller ID | Chosen from a dropdown of the account's active, voice-enabled numbers | Typed into **Calling from** (E.164) |
+| Backend involvement at sign-in | Validates with Vobiz, provisions the endpoint, returns the SIP identity | Told the SIP username and caller ID only — never the password |
+| Setup in the Vobiz Console | None | Endpoint and number attached to an application pointing at the backend |
+| Outbound calls | Conference bridge, destination dialled over the REST API | `<Dial>` from the backend's answer XML |
 
 #### Vobiz account flow
 
@@ -156,7 +163,8 @@ everything.
    POST /login  ──▶  backend validates against Vobiz
             │        and lists the account's numbers
             ▼
-   backend provisions (or reuses) a SIP endpoint for this agent
+   backend finds or creates this integration's application in that
+   account, and one SIP endpoint for this agent, with a fresh password
             │
             ▼
    GET /agent/{agentId}  ──▶  returns SIP username + password
@@ -173,27 +181,30 @@ The agent then picks which of the account's numbers outgoing calls present.
  agent types SIP username + password + the number to call from
             │
             ▼
+   POST /sip-direct  ──▶  backend records SIP user -> caller ID
+            │             (the password is never sent)
+            ▼
    panel registers with the Vobiz registrar over WebSocket  ──▶  Ready
 ```
 
-Signing in contacts no backend at all. Calls still do: Vobiz asks your backend's
-`/answer` webhook what to do with every call the endpoint places, so the
-endpoint must be attached to an Application whose answer URL is your backend —
-see [backend/README.md → SIP direct](backend/README.md#signing-in-with-sip-direct).
+Vobiz asks your backend's `/answer` webhook what to do with every call the
+endpoint places, so **the endpoint, and the number typed as caller ID, must be
+attached to an Application whose answer URL is your backend** — the Console
+steps and the API equivalent are in
+[backend/README.md → SIP direct](backend/README.md#signing-in-with-sip-direct).
+Outbound calls are dialled by `<Dial callerId="…">` in the answer XML; a call
+to the typed number rings this endpoint with `<Dial><User>`.
 
-Because there is no account session behind it, the caller ID cannot be looked
-up — listing an account's numbers is precisely what endpoint credentials do not
-authorise. So the agent types it, and the panel attaches it to each call as a
-SIP header the backend reads at answer time. The panel **refuses to connect
-without one**: carriers reject a call with no caller ID, and that failure says
-nothing about the cause.
+The caller ID cannot be looked up — listing an account's numbers is precisely
+what endpoint credentials do not authorise — so the agent types it. The panel
+**refuses to connect without one**: carriers reject a call with no caller ID,
+and that failure says nothing about the cause. Vobiz refuses a caller ID the
+endpoint's account does not own.
 
 #### What SIP direct cannot do
 
-- **Enable inbound calls** — changing number routing is account-level, so the
-  button needs the Vobiz account tab.
-- **Receive inbound calls on the reference backend**, which offers an incoming
-  caller only to an agent signed in on the Vobiz account tab.
+- **The number dropdown and Enable inbound calls** — both need the account API.
+  The panel says "Sign in with your Vobiz account to use this."
 
 Everything else — dialling, click-to-dial, screen-pop, recording, the call
 Task — is identical.
@@ -383,7 +394,7 @@ https://calling.example.com/salesforce/softphone.html?org=https://your-org.my.sa
 | Parameter | Required | Default | What it is |
 |---|---|---|---|
 | `org` | **yes** | derived from the framing page | Your My Domain host. Open CTI is served per-org and there is no CDN copy, so the panel must be told where to load the toolkit from. |
-| `agentId` | **yes** | — | Which identity this call centre registers as. **Every agent needs a different value**, or calls ring the wrong person. |
+| `agentId` | **yes** | — | Which identity this call centre registers as. **Every agent on the same Vobiz account needs a different value**, or calls ring the wrong person. Agents on different Vobiz accounts may reuse a value. |
 | `backendUrl` | no | wherever the panel was served from | Only needed when the panel is hosted away from the backend. Honoured only when Salesforce frames the panel. |
 | `registrarUrl` | no | `wss://registrar.vobiz.ai:5063/` | Leave alone unless Vobiz support says otherwise. Must be a `wss://` host on `vobiz.ai`. |
 | `apiVersion` | no | `64.0` | Open CTI API version, such as `62.0`. |
@@ -463,7 +474,8 @@ Then point a Call Center at
 `https://<tunnel>/salesforce/softphone.html?org=…&agentId=…` and hard-refresh
 Salesforce. A quick tunnel gets a **new URL every restart** — update
 `PUBLIC_BASE_URL`, the adapter URL, and sign in again so the backend re-points
-the agent's Application. A wildcard Trusted URL (`https://*.trycloudflare.com`)
+the account's Application (a new answer URL means a new application is found
+or created for it). A wildcard Trusted URL (`https://*.trycloudflare.com`)
 saves re-doing step 2 each time.
 
 **Editing:** change a file, hard-refresh Salesforce. There is nothing to
@@ -527,8 +539,8 @@ the checklist, including the endpoints that are easy to implement in a way that
 leaks call recordings. Please read it.
 
 The **SIP direct** tab exists partly for this reason: an agent who only ever
-works one endpoint can sign in without account-wide credentials ever reaching a
-browser, and the backend never serves a SIP password.
+works one endpoint can sign in without account-wide credentials ever reaching
+the backend, and the SIP password goes only to the Vobiz registrar.
 
 Two Salesforce-specific notes:
 

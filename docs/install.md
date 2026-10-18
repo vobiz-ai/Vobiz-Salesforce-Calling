@@ -71,7 +71,7 @@ first, under Setup → **Session Settings** → Browser Feature Permissions.
    | Parameter | Required | What it is |
    |---|---|---|
    | `org` | yes | Your My Domain host. Open CTI is served per-org; there is no CDN copy. |
-   | `agentId` | yes | Which identity this call centre registers as. **Every agent needs a different value.** |
+   | `agentId` | yes | Which identity this call centre registers as. **Every agent on one Vobiz account needs a different value.** |
    | `backendUrl` | no | Defaults to wherever the panel is served from. |
    | `apiVersion` | no | Open CTI version, default `64.0`. |
 

@@ -60,7 +60,7 @@ password. The panel then shows "Sign in below" instead of trying to register.
 Session restore, called when the panel loads.
 
 ```json
-{ "loggedIn": true, "numbers": ["+919876543210"], "from": "+919876543210", "authId": "MA_XXXXXXXX" }
+{ "loggedIn": true, "numbers": ["+910000000001"], "from": "+910000000001", "authId": "MA_XXXXXXXX" }
 ```
 
 Return `{ "loggedIn": false }` when there is no session. Errors are swallowed by
@@ -72,22 +72,33 @@ the app.
 { "agentId": "priya", "authId": "MA_XXXXXXXX", "authToken": "..." }
 ```
 
-Validate against Vobiz, store the credentials server-side keyed by `agentId`,
-and return the account's numbers:
+Any Vobiz account may sign in. Validate the pair against Vobiz with
+`GET /api/v1/Account/{authId}/numbers?page=N&per_page=100` (a non-2xx is a
+401 for the panel), reading every page and keeping numbers with
+`status === "active"` and `voice_enabled !== false`. Keep the Auth Token
+server-side, in memory, keyed by **Auth ID** — never return it, log it or write
+it to disk — and key the agent's session by `(authId, agentId)`, since two
+accounts can both have an agent called `agent-one`. Return the numbers and the
+application each is on now:
 
 ```json
-{ "numbers": ["+919876543210", "+919876543211"], "selected": "+919876543210" }
+{ "numbers": ["+910000000001", "+910000000002"], "numberApps": { "+910000000001": "<app id or null>" }, "selected": "+910000000001" }
 ```
+
+Do not check the Auth ID against an account the backend was configured for:
+there is none.
 
 On failure return a non-2xx status with `{ "error": "..." }`.
 
 ### `POST /select-number`
 
 ```json
-{ "agentId": "priya", "number": "+919876543211" }
+{ "agentId": "priya", "number": "+910000000002" }
 ```
 
-→ `{ "selected": "+919876543211" }`
+→ `{ "selected": "+910000000002" }`
+
+Refuse a number that is not in the account's list.
 
 ### `POST /setup-inbound`
 
@@ -95,14 +106,28 @@ On failure return a non-2xx status with `{ "error": "..." }`.
 { "agentId": "priya", "platform": "salesforce" }
 ```
 
-→ `{ "number": "+919876543210" }`
+→ `{ "number": "+910000000001", "applicationId": "...", "previousApplicationId": "..." }`
 
-Creates (or reuses) a Vobiz application pointing at your `/inbound-answer`, and
-attaches the agent's selected number to it.
+Finds (by answer URL) or creates a Vobiz application pointing at your
+`/inbound-answer` in the agent's account, and attaches the agent's selected
+number to it — the only place a number is ever attached, because it moves the
+number off whatever application it was on.
 
 Requires an account session. An agent signed in with endpoint credentials
 (**SIP direct**) cannot call this — changing number routing is account-level —
-so return an error rather than guessing at credentials.
+so return an error ("Sign in with your Vobiz account to use this.").
+
+### `POST /sip-direct`
+
+```json
+{ "agentId": "priya", "sipUser": "deskphone01", "callerId": "+910000000004" }
+```
+
+→ `{ "sipUser": "deskphone01", "callerId": "+910000000004" }`, and a session cookie.
+
+The SIP-direct sign-in. The panel registers with the SIP password itself and
+never sends it here. Record `sipUser -> callerId` (strict E.164) so the
+webhooks can route this endpoint's calls; no account credentials are involved.
 
 ### `GET /inbound-pending/{agentId}`
 
@@ -122,8 +147,8 @@ A caller waiting:
 {
   "pending": true,
   "room": "zh<call-uuid-without-punctuation>",
-  "from": "919876543210",
-  "to": "+919876543211",
+  "from": "910000000098",
+  "to": "+910000000002",
   "callUuid": "..."
 }
 ```
@@ -139,7 +164,7 @@ A caller waiting:
 { "agentId": "priya" }
 ```
 
-→ `{ "ok": true, "room": "zh...", "from": "919876543210", "callUuid": "..." }`
+→ `{ "ok": true, "room": "zh...", "from": "910000000098", "callUuid": "..." }`
 
 Stop the no-answer timer **here**, before the browser's leg arrives — a slow
 join otherwise races the caller into voicemail. Record that a join is now
@@ -232,7 +257,7 @@ and dial the destination into it over the REST API:
               endConferenceOnExit="true"
               waitSound="https://you.example.com/outbound-wait"
               timeLimit="14400"
-              callbackUrl="https://you.example.com/conf-event?agentId=priya"
+              callbackUrl="https://you.example.com/conf-event?room=ROOM&amp;role=agent"
               callbackMethod="POST">ROOM</Conference>
   <Hangup/>
 </Response>
@@ -240,9 +265,9 @@ and dial the destination into it over the REST API:
 
 ```
 POST /api/v1/Account/{auth_id}/Call/
-  to=919876543211
-  from=+919876543210
-  answer_url=https://you.example.com/outbound-join?room=ROOM&agentId=priya
+  to=910000000002
+  from=+910000000001
+  answer_url=https://you.example.com/outbound-join?room=ROOM
   answer_method=GET
 ```
 
@@ -255,10 +280,18 @@ POST /api/v1/Account/{auth_id}/Call/
 > If you implement the `<Dial>` path anyway, keep it behind a flag so you can
 > switch back without a deploy.
 
+**Who is calling** comes from the SIP user in `From`, mapped to the session
+whose endpoint it is — never from a query parameter, which anyone can write.
+
 **Caller ID.** The A leg's own caller ID is a SIP username, which is not a
-dialable CLI. Use, in order: the `X-VH-Caller-ID` header the panel sends (the
-only source an agent signed in with endpoint credentials has), then the number
-selected in their account session, then your account default.
+dialable CLI. Use the `X-VH-Caller-ID` header the panel sends (it may arrive as
+`SIPHeader_X-VH-Caller-ID`) when the account owns that number, otherwise the
+number selected in the session. Never a number from configuration.
+
+**SIP direct.** A SIP user signed in through `/sip-direct` has no account
+credentials behind it, so there is no REST call to make: answer with
+`<Dial callerId="<caller ID>"><Number>…</Number></Dial>` and let Vobiz refuse a
+caller ID the account does not own.
 
 **An `Event=Hangup` request is not a request for instructions.** Answer it with
 an empty `<Response></Response>`; returning call-control XML originates a fresh
@@ -315,8 +348,14 @@ unreachable destination or a caller ID the account does not own.
 
 ### `GET|POST /inbound-answer`
 
-The answer URL for calls to your DID. Park the caller in a room of their own and
-follow it with voicemail:
+The answer URL for calls to your DID. First find whose call it is: the
+webhook's `ParentAuthID` names the account; fall back to matching the dialled
+`To` against signed-in accounts' numbers. Ring that account's open panels, and
+no other account's. If nobody is signed in for it, a short `<Speak>` and
+`<Hangup/>`, and a log line. If the number belongs to a SIP-direct sign-in,
+answer `<Dial callerId="<To in E.164>"><User>sip:<user>@registrar.vobiz.ai</User></Dial>`.
+
+Otherwise park the caller in a room of their own and follow it with voicemail:
 
 ```xml
 <Response>
@@ -324,7 +363,7 @@ follow it with voicemail:
               endConferenceOnExit="true"
               waitSound="https://you.example.com/conf-wait"
               timeLimit="3600"
-              callbackUrl="https://you.example.com/conf-event?agentId=priya"
+              callbackUrl="https://you.example.com/conf-event?room=ROOM&amp;role=agent"
               callbackMethod="POST">ROOM</Conference>
   <!-- reached only if the room ends before an agent joins -->
   <Speak>Sorry, nobody is available. Please leave a message after the beep.</Speak>

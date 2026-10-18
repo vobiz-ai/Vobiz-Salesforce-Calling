@@ -145,11 +145,15 @@ function setLoginStatus(text) {
  *            dropdown rather than something to be typed correctly.
  *
  * "sip"      The endpoint's own SIP username and password, typed here.
- *            Nothing account-wide is involved, the backend is never
- *            asked for credentials, and one agent signing in cannot
- *            obtain another's. The caller ID has to be typed, because
- *            listing the account's numbers is exactly the thing these
- *            credentials do not authorise.
+ *            Nothing account-wide is involved: the password goes only to
+ *            the registrar, and the backend is told just the SIP username
+ *            and caller ID, so it can route this endpoint's calls. The
+ *            caller ID has to be typed, because listing the account's
+ *            numbers is exactly the thing these credentials do not
+ *            authorise. The endpoint and the number must already be
+ *            attached to an application whose answer URL is this backend.
+ *            Account features (number list, Enable inbound) say to sign
+ *            in with the Vobiz account instead.
  *
  * Worth being plain about the trade: an endpoint password in the browser
  * is not a new exposure — the account path already sends one here, from
@@ -187,6 +191,9 @@ function setAuthMode(mode) {
   // Picking from the account's numbers needs account credentials, so in SIP
   // mode the caller ID is a field inside that panel instead.
   show("step-caller-id", !isSip);
+  // Enable inbound attaches a number to an application — an account API call.
+  show("setup-inbound-btn", !isSip);
+  show("inbound-account-only", isSip);
 
   const tab = (id, active) => {
     const el = document.getElementById(id);
@@ -211,7 +218,7 @@ function sipDirectCallerId() {
  * caller ID cannot come from the backend and travels on each call instead —
  * see callHeaders().
  */
-function sipDirectConnect() {
+async function sipDirectConnect() {
   const username = (document.getElementById("sip-username") || {}).value?.trim() || "";
   const password = (document.getElementById("sip-password") || {}).value || "";
   const callerId = sipDirectCallerId();
@@ -233,6 +240,22 @@ function sipDirectConnect() {
   // A bare username is the common case; the domain comes from the registrar.
   const sipUser = username.includes("@") ? username : `${username}@registrar.vobiz.ai`;
   setLoginStatus(`Signing in as ${username}…`);
+
+  // Tell the backend which caller ID — and so which inbound number — belongs
+  // to this SIP user. Never the password: that goes only to the registrar.
+  try {
+    const res = await backendFetch(`${BACKEND_URL}/sip-direct`, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ agentId: AGENT_ID, sipUser: username, callerId }),
+    });
+    const data = await res.json();
+    if (!res.ok) throw new Error(data.error || `sign-in failed (${res.status})`);
+  } catch (err) {
+    console.error("[Vobiz] SIP direct sign-in failed:", err);
+    setLoginStatus(`Could not sign in: ${err.message}`);
+    return;
+  }
   // Nothing is verified against an account, so dialling is enabled on the
   // strength of the registration alone — refreshDialState still requires it.
   setDialEnabled(true);
@@ -255,14 +278,20 @@ function restoreAuthMode() {
   if (saved.password && saved.callerId) sipDirectConnect();
 }
 
-function renderNumberOptions(numbers, selected) {
+/**
+ * The caller ID dropdown: the signed-in account's active, voice-enabled
+ * numbers, as the backend listed them from Vobiz. Each shows the application
+ * it is on now, which is what "Enable inbound calls" would move it off.
+ */
+function renderNumberOptions(numbers, selected, numberApps = {}) {
   const select = document.getElementById("vobiz-number-select");
   if (!select) return;
   select.innerHTML = "";
   (numbers || []).forEach(n => {
     const opt = document.createElement("option");
     opt.value = n;
-    opt.textContent = n;
+    const app = numberApps && numberApps[n];
+    opt.textContent = app ? `${n} (on application ${app})` : n;
     if (n === selected) opt.selected = true;
     select.appendChild(opt);
   });
@@ -718,8 +747,8 @@ async function restoreVobizSession() {
   try {
     const res = await backendFetch(`${BACKEND_URL}/session/${encodeURIComponent(AGENT_ID)}`);
     const session = await res.json();
-    if (session.loggedIn) {
-      renderNumberOptions(session.numbers, session.from);
+    if (session.loggedIn && session.mode !== "sip") {
+      renderNumberOptions(session.numbers, session.from, session.numberApps);
       setLoginStatus(`Logged in as ${session.authId} — calling from ${session.from}`);
       setDialEnabled(true);
     } else {
@@ -746,7 +775,7 @@ async function vobizLogin() {
     });
     const data = await res.json();
     if (!res.ok) throw new Error(data.error || `login failed (${res.status})`);
-    renderNumberOptions(data.numbers, data.selected);
+    renderNumberOptions(data.numbers, data.selected, data.numberApps);
     setLoginStatus(
       (data.numbers || []).length
         ? `Logged in as ${authId} — calling from ${data.selected}`
@@ -805,7 +834,9 @@ async function setupInboundCalling() {
     });
     const data = await res.json();
     if (!res.ok) throw new Error(data.error || `setup failed (${res.status})`);
-    statusEl.textContent = `Inbound calls to ${data.number} now ring this panel.`;
+    const moved = data.previousApplicationId && data.previousApplicationId !== data.applicationId
+      ? ` It was moved off application ${data.previousApplicationId}.` : "";
+    statusEl.textContent = `Inbound calls to ${data.number} now ring this panel.${moved}`;
     statusEl.classList.add("is-ok");
   } catch (err) {
     console.error("[Vobiz] Inbound setup failed:", err);
