@@ -17,7 +17,12 @@ It stores one thing in the browser, and only when the agent ticks **Remember**
 on the SIP direct tab: that endpoint's username, password and caller ID, in
 `localStorage` on their own machine. Untick it and nothing is written. Nothing
 is stored on the account tab — the Auth Token is exchanged with the backend and
-never kept.
+never kept in the browser. On the SIP direct tab the password goes only to the
+Vobiz registrar; the backend is told the SIP username and caller ID.
+
+The reference backend holds each signed-in account's Auth Token in memory only,
+keyed by Auth ID, and never returns, logs or writes it. Nothing about a Vobiz
+account is configured in its environment.
 
 **Most of the attack surface of this integration lives in the calling backend**,
 which is a separate service that you run and that holds your Vobiz Auth Token.

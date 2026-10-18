@@ -133,7 +133,7 @@
 
             <div class="form-group">
               <label class="field-label" for="sip-caller-id">Calling from</label>
-              <input type="tel" id="sip-caller-id" class="input input-mono" placeholder="+91XXXXXXXXXX" autocomplete="off" />
+              <input type="tel" id="sip-caller-id" class="input input-mono" placeholder="+ country code and number" autocomplete="off" />
               <p class="hint">
                 The number outgoing calls show. Carriers reject a call without a
                 real one, so this is required to dial out.
@@ -191,7 +191,7 @@
           <div id="dialbox">
             <div class="form-group">
               <label class="field-label" for="dialnumber">Number to call</label>
-              <input type="tel" id="dialnumber" class="input input-mono input-dial" placeholder="+91 98765 43210" />
+              <input type="tel" id="dialnumber" class="input input-mono input-dial" placeholder="+ country code and number" />
             </div>
             <label class="check-row" for="record-call">
               <input type="checkbox" id="record-call" />
@@ -233,6 +233,11 @@
             inbound calls ring in the browser.
           </p>
           <button id="setup-inbound-btn" class="btn btn-secondary">Enable inbound calls</button>
+          <p id="inbound-account-only" class="hint" hidden>
+            Sign in with your Vobiz account to use this. Signed in with SIP
+            direct, calls to your caller ID ring here once that number is
+            attached to an application whose answer URL is this backend.
+          </p>
           <p id="inbound-setup-status" class="hint"></p>
         </section>
       </div>

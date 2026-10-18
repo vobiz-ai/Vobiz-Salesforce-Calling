@@ -85,6 +85,18 @@ and one side hears nothing. Establishing each leg separately into a conference
 room is the path that carries audio consistently, so that is what the backend
 does.
 
+## SIP direct calls
+
+An agent signed in on the **SIP direct** tab gives the backend no account
+credentials, so neither the REST-dialled conference above nor the parked-caller
+flow below is possible for them. Their calls use plain XML instead, the way
+Vobiz's own WebRTC playground does: `<Dial callerId="…"><Number>` out, and
+`<Dial callerId="<DID>"><User>sip:<user>@registrar.vobiz.ai</User>` in, which
+the panel's JsSIP stack answers directly. The panel's SIP User-Agent is a single
+token for exactly this reason: a space in it stops Vobiz delivering a
+`<Dial><User>` call. This path has not been verified with a live call from this
+repository.
+
 ## An inbound call
 
 Vobiz cannot deliver a call *into* a registered WebRTC endpoint, so the panel is

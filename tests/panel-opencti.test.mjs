@@ -21,7 +21,7 @@ function emitter() {
 
 const SIGNED_IN = {
   "/agent/": { displayName: "Agent One", sipUser: "agentone@registrar.vobiz.ai", sipPassword: "s3cret-pass", provisioned: true },
-  "/session/": { loggedIn: true, numbers: ["+917900000000"], from: "+917900000000", authId: "MA_TEST" },
+  "/session/": { loggedIn: true, numbers: ["+910000000001"], from: "+910000000001", authId: "MA_TEST0001" },
 };
 
 async function boot({ searchResult = {}, backend = {} } = {}) {
@@ -97,10 +97,10 @@ const ofMethod = (calls, m) => calls.filter(c => c.method === m);
 test("click-to-dial is enabled and its record is used without a second pop", async () => {
   const { calls, sessions, click } = await boot();
   assert.equal(ofMethod(calls, "enableClickToDial").length, 1);
-  click({ number: "+919876543210", recordId: "003AAA", objectType: "Contact" });
+  click({ number: "+910000000099", recordId: "003AAA", objectType: "Contact" });
   await tick();
   assert.equal(sessions.length, 1);
-  assert.equal(sessions[0].target, "sip:+919876543210@registrar.vobiz.ai");
+  assert.equal(sessions[0].target, "sip:+910000000099@registrar.vobiz.ai");
   assert.equal(ofMethod(calls, "searchAndScreenPop").length, 0, "the agent is already on the record");
 
   sessions[0].emit("confirmed");
@@ -116,12 +116,12 @@ test("a dialled number pops its record as the call starts, not when it ends", as
   const { calls, sessions, panel } = await boot({
     searchResult: { "001BBB": { Id: "001BBB", Name: "Acme", RecordType: "Account" } },
   });
-  panel.placeCall("+919876543210");
+  panel.placeCall("+910000000099");
   await tick();
   const pops = ofMethod(calls, "searchAndScreenPop");
   assert.equal(pops.length, 1, "popped before the call ended");
   assert.equal(pops[0].args.callType, "outbound");
-  assert.equal(pops[0].args.searchParams, "+919876543210");
+  assert.equal(pops[0].args.searchParams, "+910000000099");
 
   sessions[0].emit("ended");
   for (let i = 0; i < 5; i++) await tick();
@@ -136,8 +136,8 @@ test("an inbound caller's record pops while the panel rings", async () => {
   const { calls, sessions, panel } = await boot({
     searchResult: { "003CCC": { Id: "003CCC", Name: "Priya", RecordType: "Contact" } },
     backend: {
-      "/inbound-pending/": { pending: true, room: "zhabc", from: "919876543210", callUuid: "uuid-1" },
-      "/inbound-accept": { ok: true, room: "zhabc", from: "919876543210", callUuid: "uuid-1" },
+      "/inbound-pending/": { pending: true, room: "zhabc", from: "910000000099", callUuid: "uuid-1" },
+      "/inbound-accept": { ok: true, room: "zhabc", from: "910000000099", callUuid: "uuid-1" },
     },
   });
   panel.setSipRegistered(true);
@@ -163,7 +163,7 @@ test("several matches pop nothing in particular and relate the Task to nothing",
   const { calls, sessions, panel } = await boot({
     searchResult: { "003A": { RecordType: "Contact" }, "003B": { RecordType: "Contact" } },
   });
-  panel.placeCall("+919876543210");
+  panel.placeCall("+910000000099");
   sessions[0].emit("ended");
   for (let i = 0; i < 5; i++) await tick();
   const [log] = ofMethod(calls, "saveLog");
@@ -175,4 +175,12 @@ test("the SIP User-Agent is a single token", () => {
   const ua = /user_agent:\s*"([^"]+)"/.exec(PANEL_SRC);
   assert.ok(ua, "a user_agent is set");
   assert.doesNotMatch(ua[1], /\s/);
+});
+
+test("the panel hard-codes no caller ID, phone number or Auth ID", () => {
+  const html = readFileSync(new URL("../app/softphone.html", import.meta.url), "utf8");
+  for (const src of [PANEL_SRC, html, HOST_SRC]) {
+    assert.doesNotMatch(src, /\+?\b\d{2}[ -]?\d{5}[ -]?\d{5}\b/, "a phone number");
+    assert.doesNotMatch(src, /MA_(?!X{8})[A-Z0-9]{8}/, "an Auth ID");
+  }
 });
