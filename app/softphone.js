@@ -1,31 +1,18 @@
 /** === Vobiz Calling — Salesforce Open CTI softphone ===
  *
- * GENERATED from the Freshsales panel by tools/port-from-freshsales.mjs.
+ * A softphone panel that lives in Salesforce's Open CTI utility item. It stays
+ * registered over SIP for as long as the panel is open, starts a call when an
+ * agent clicks a phone number anywhere in Salesforce, pops the matching record,
+ * and writes a call Task when the call ends.
  *
- * The telephony is identical on purpose — the conference bridge, the ICE
- * gathering cap, the placeholder-password gate and the caller release on hangup
- * are not CRM-specific and should not be reimplemented per platform. Only the
- * CRM write-back below differs, and app/opencti-host.js supplies the host
- * object this file expects.
- *
- * Fix telephony in the Freshsales panel and re-run the port. Fix Salesforce
- * behaviour in opencti-host.js or in the CRM functions, and mirror it into this
- * script so the next port does not undo it.
- */
-/** === Vobiz Calling — Freshsales CTI app ===
- *
- * A softphone panel that lives in Freshworks CRM's `left_nav_cti` placeholder.
- * It stays registered over SIP for as long as the panel is open, starts a call
- * when an agent clicks a phone number anywhere in the CRM (Freshworks CRM emits
- * `calling`, where Freshdesk emitted `cti.triggerDialer`), and writes a call log
- * against the matching contact when the call ends.
- *
- * Every value this app needs is an installation parameter — see
- * config/iparams.json. Nothing about a particular account is compiled in.
+ * app/opencti-host.js supplies the `app`/`client` object this file talks to,
+ * backed by Open CTI. Every setting comes from the adapter URL's query string —
+ * nothing about a particular account is compiled in.
  *
  * This app is a client. It cannot place a call on its own: it talks to a
  * calling backend that holds the Vobiz account credentials and drives the
- * Vobiz REST API. That contract is documented in docs/backend-contract.md.
+ * Vobiz REST API. That contract is documented in docs/backend-contract.md, and
+ * backend/ is a reference implementation of it.
  */
 let BACKEND_URL = null;
 let AGENT_ID = null;
@@ -86,7 +73,7 @@ async function init() {
     setStatus("Not configured — set the Backend URL and Agent Identity in this app's settings.");
     return;
   }
-  // A bare hostname would resolve relative to the Freshdesk app origin and
+  // A bare hostname would resolve relative to the panel's own origin and
   // 404 silently, which looks like "the backend is down" rather than a typo.
   // http://localhost is the one exemption: browsers already treat it as a
   // secure context, and the mock backend serves plain HTTP for local dev.
@@ -372,15 +359,13 @@ function endIncoming(status) {
  *
  * An ordinary outgoing call, the same direction the panel already uses for
  * every other call. Going out rather than being rung is the entire point:
- * Vobiz cannot deliver an INVITE into a browser (see the note in the backend),
+ * Vobiz cannot deliver an INVITE into a browser (see docs/architecture.md),
  * but a browser calling out works, so inbound is built from an outgoing leg.
  *
  * The number dialled is the CALLER's, and it is never actually rung. Vobiz
- * resolves every destination through its own routing service before anything
- * else, and a conference room name is not something it can resolve:
- *
- *   GET vapor.vobiz.ai/api/v1/IncomingRoute/?destination=fdf5434599...
- *     -> 500, retried, then 486 Busy and the leg is dropped
+ * resolves every destination through its routing service before anything
+ * else, and a conference room name is not something it can resolve — the leg
+ * fails as a bogus 486 Busy.
  *
  * A phone number resolves, so that is what goes on the wire. The backend
  * recognises the agent has an accepted call waiting and answers with
@@ -391,9 +376,9 @@ function endIncoming(status) {
  * How long to wait for ICE gathering before sending the offer anyway.
  *
  * JsSIP holds the INVITE until gathering finishes or its own timeout expires,
- * and on a measured inbound leg that was 40.2s from Accept to INVITE with the
- * caller listening to hold music throughout. One server-reflexive candidate is
- * all the media server needs.
+ * which on a machine with many network interfaces can be tens of seconds — with
+ * an inbound caller listening to hold music throughout. One server-reflexive
+ * candidate is all the media server needs.
  */
 const ICE_CAP_MS = 2500;
 
@@ -431,7 +416,7 @@ function capIceGathering(session, label) {
   setTimeout(() => go("gathering took too long"), ICE_CAP_MS);
 }
 
-function joinRoom(room, from, callUuid) {
+function joinRoom(room, from, callUuid, record = Promise.resolve(null)) {
   const numEl = document.getElementById("callnum");
   const caller = from || "";
   const target = String(caller).replace(/[^\d+]/g, "");
@@ -507,13 +492,11 @@ function joinRoom(room, from, callUuid) {
           body: JSON.stringify({ agentId: AGENT_ID, callUuid }),
         }).catch(err => console.warn("[Vobiz] could not release the caller's leg:", err));
       }
-      // A call nobody answered is still worth filing, with a duration of zero
-      // rather than however long it rang.
-      logCallToCrm({
-        number: caller,
-        inbound: true,
-        durationSec: startedAt ? (Date.now() - startedAt) / 1000 : 0,
-      }).then(openContact);
+      // A call that never connected is still worth filing, with a duration of
+      // zero rather than however long it rang. The record was found — and
+      // popped — when the call started ringing.
+      const durationSec = startedAt ? (Date.now() - startedAt) / 1000 : 0;
+      record.then(match => logCallToCrm({ number: caller, inbound: true, durationSec, record: match }));
     });
   } catch (err) {
     console.error("[Vobiz] could not join the room:", err);
@@ -524,9 +507,8 @@ function joinRoom(room, from, callUuid) {
 
 async function acceptCall() {
   // Two shapes of incoming call arrive here. `incomingOffer` is the conference
-  // bridge, which is what actually happens today. The JsSIP branch below is the
-  // direct <Dial><User> path: it costs nothing to keep and starts working by
-  // itself the day Vobiz fixes its router.
+  // bridge, which is how inbound works. The JsSIP branch below handles a call
+  // delivered straight to this endpoint, for a backend that routes one here.
   if (incomingOffer) {
     const offer = incomingOffer;
     incomingOffer = null;
@@ -547,7 +529,7 @@ async function acceptCall() {
       const data = await res.json();
       // The caller may have hung up in the second it took to click.
       if (!data.ok) throw new Error(data.reason || "the call is no longer ringing");
-      joinRoom(data.room, data.from || offer.from, data.callUuid || offer.callUuid);
+      joinRoom(data.room, data.from || offer.from, data.callUuid || offer.callUuid, offer.record);
     } catch (err) {
       console.error("[Vobiz] accept failed:", err);
       endIncoming(`Could not accept — ${err.message}`);
@@ -630,7 +612,14 @@ async function pollInbound() {
     const res = await backendFetch(`${BACKEND_URL}/inbound-pending/${encodeURIComponent(AGENT_ID)}`);
     const data = await res.json();
     if (!data || !data.pending) return;
-    incomingOffer = { room: data.room, from: data.from, callUuid: data.callUuid };
+    incomingOffer = {
+      room: data.room,
+      from: data.from,
+      callUuid: data.callUuid,
+      // Looked up while the panel rings, so the caller's record is already on
+      // screen by the time the agent decides whether to accept.
+      record: findRecord(data.from, true),
+    };
     incomingPending = true;
     showIncoming(data.from || "unknown");
     startRingtone();
@@ -645,9 +634,8 @@ async function pollInbound() {
 function startInboundPolling() {
   if (inboundPollTimer) return;
   // Every second, not every two. The caller is listening to hold music for the
-  // whole of this, and on a measured call 45s passed between them parking and
-  // the agent's leg reaching Vobiz — they hung up 1.5s after it arrived. Every
-  // part of that delay this panel owns is worth removing.
+  // whole of this, and every part of that delay this panel owns is worth
+  // removing.
   inboundPollTimer = setInterval(pollInbound, 1000);
 }
 
@@ -766,9 +754,8 @@ async function vobizLogin() {
     );
     setDialEnabled(Boolean(data.selected));
 
-    // The SIP identity is the thing account credentials buy: where agents.json
-    // has no usable entry, the backend provisions an endpoint from the account
-    // during this call, so it does not exist until now. Re-running the identity
+    // The SIP identity is the thing account credentials buy: the backend
+    // provisions an endpoint from the account during this call, so it does not exist until now. Re-running the identity
     // fetch registers with it. Without this the account login succeeds while
     // the panel stays OFFLINE, still showing the pre-sign-in failure.
     await initVobizSip();
@@ -814,7 +801,7 @@ async function setupInboundCalling() {
       headers: { "Content-Type": "application/json" },
       // Declaring the platform matters: this panel is browser-only, so the
       // backend must not also ring the agent's mobile on an inbound call.
-      body: JSON.stringify({ agentId: AGENT_ID, platform: "freshsales" }),
+      body: JSON.stringify({ agentId: AGENT_ID, platform: "salesforce" }),
     });
     const data = await res.json();
     if (!res.ok) throw new Error(data.error || `setup failed (${res.status})`);
@@ -933,7 +920,7 @@ function attachRemoteAudio(session) {
   bindTrack(session.connection);
 }
 
-/** What backend/agents.json ships with, so it can be told apart from a real one. */
+/** A placeholder a backend may return before sign-in, so it is never registered with. */
 const PLACEHOLDER_SIP_PASSWORD = "PUT-THE-ENDPOINT-PASSWORD-HERE";
 
 async function initVobizSip() {
@@ -955,9 +942,8 @@ async function initVobizSip() {
     return;
   }
 
-  // Before account sign-in the backend has no identity to hand over. agents.json
-  // ships a placeholder password, and a placeholder reaches the registrar as an
-  // ordinary wrong password — so registering here puts "Registration failed:
+  // Before account sign-in the backend has no identity to hand over. A
+  // placeholder password reaches the registrar as an ordinary wrong password — so registering here puts "Registration failed:
   // Authentication Error" on the panel, blaming an Auth ID and Auth Token the
   // agent has not typed yet. vobizLogin() calls this again once sign-in has let
   // the backend provision a real endpoint from the account.
@@ -1002,25 +988,15 @@ function startSipUA(sipUser, sipPassword, displayName) {
     uri: `sip:${sipUser}`,
     password: sipPassword,
     register: true,
-    // No space in the User-Agent, deliberately.
-    //
-    // Vobiz stores the registration's User-Agent and later interpolates it into
-    // a gateway URI as a `user_agent=` parameter when <Dial><User> routes a call
-    // back to this endpoint. JsSIP's default is "JsSIP 3.10.1" — the space makes
-    // that URI unparseable, and Kamailio drops the INVITE rather than ringing us:
-    //
-    //   ERROR: tr_eval_uri(): invalid uri [...;user_agent=JsSIP 3.10.1;...]
-    //   INVITE|blocking gw: ...
-    //
-    // The caller then hears ringback and nothing else, and the dial result reads
-    // ring=true with no B leg. Confirmed in vobiz-outboundsip logs, 16 Sep 2026.
-    user_agent: "VobizFreshsalesCalling/1.0.0",
+    // No space in the User-Agent, deliberately. Vobiz embeds the registration's
+    // User-Agent in a SIP URI when it routes a call to this endpoint, and a
+    // space (JsSIP's default is "JsSIP 3.10.1") makes that URI unparseable, so
+    // the call is dropped before it reaches the browser. Keep it one token.
+    user_agent: "VobizSalesforceCalling/1.1.0",
     // Vobiz's media server rejects JsSIP's default session-timer proposal with
-    // "422 Session Interval Too Small", which JsSIP surfaces to the app as the
-    // opaque cause "SIP Failure Code" and which produces no CDR at all, because
-    // the call is refused before it is ever created. Vobiz's own SDK sets this
-    // same flag (vobiz-webrtc-sdk/lib/managers/account.ts), so matching it is
-    // the supported configuration rather than a workaround.
+    // "422 Session Interval Too Small", which JsSIP surfaces only as the opaque
+    // cause "SIP Failure Code", with no CDR because the call is never created.
+    // Vobiz's own WebRTC SDK disables session timers the same way.
     session_timers: false,
   });
   vobizUA = ua;
@@ -1102,44 +1078,34 @@ function startSipUA(sipUser, sipPassword, displayName) {
 }
 
 /* ------------------------------------------------------------------ *
- * Freshsales call logging
+ * Salesforce: screen pop and call logging, over Open CTI
  *
- * Every field below was established against a live Freshsales account, because
- * the published documentation does not match what the API accepts:
- *
- *   - The endpoint is /crm/sales/api/phone_calls. Freshworks' own CTI codelab
- *     names /crm/sales/api/cti_phone_calls, which answers 400 to every shape.
- *   - The body is multipart/form-data with phone_call[...] bracket keys. JSON
- *     is accepted for scalars but silently drops targetable and errors on note.
- *   - call_direction is a BOOLEAN, not a string: true sets status "incoming",
- *     false sets "outgoing". Sending the word "incoming" stores false.
- *   - targetable needs BOTH targetable_type and targetable[id]. Sending a
- *     targetable object instead raises a server-side Ruby error.
- *   - A note has to be nested as note[description]. Plain note= or
- *     description= are ignored, and note= as a string raises a server error.
- *
- * Not solved: attaching the recording as playable audio. `recording`,
- * `recording_url` and `external_recording_url` are all ignored and the record's
- * own is_external_recording_url flag never leaves false. The link is put in the
- * note instead, which is at least reachable from the contact.
+ * The record is looked up once per call, as early as possible — on ring for
+ * an inbound call, on dial for an outbound one — so the agent lands on it
+ * while the call is still connecting. The same match is then used to relate
+ * the Task written when the call ends, without popping anything a second time.
  * ------------------------------------------------------------------ */
 
-/** Freshsales matches on the E.164 form; without the leading + it finds nothing. */
+/** Numbers are searched and logged in E.164 form. */
 function e164(number) {
   const digits = String(number || "").replace(/[^\d+]/g, "");
   if (!digits) return "";
   return digits.startsWith("+") ? digits : `+${digits}`;
 }
 
+/** Object types a Task's WhoId may point at. Any other match goes in WhatId. */
+const WHO_TYPES = new Set(["Contact", "Lead"]);
+
 /**
  * The Salesforce record this number belongs to, or null when nobody matches.
  *
  * searchAndScreenPop does the lookup and the screen pop in one call, which is
- * how Open CTI expects a softphone to behave: the agent lands on the record
- * while the call is still connecting rather than after it. A miss is not an
+ * how Open CTI expects a softphone to behave. One match pops automatically;
+ * several leave Salesforce's own search results on screen for the agent to
+ * choose from, and the panel does not guess on their behalf. A miss is not an
  * error — plenty of calls are to people who are not in the CRM.
  */
-async function findContact(number, inbound) {
+async function findRecord(number, inbound) {
   const phone = e164(number);
   if (!phone) return null;
   try {
@@ -1148,14 +1114,13 @@ async function findContact(number, inbound) {
       callType: inbound ? sforce.opencti.CALL_TYPE.INBOUND : sforce.opencti.CALL_TYPE.OUTBOUND,
       deferred: false,
     });
-    // Keyed by record id, with the object type inside each entry. One match
-    // pops automatically; several leave the agent to choose, and the panel
-    // should not guess on their behalf.
-    const ids = Object.keys(found || {});
+    // Keyed by record id, with the object type in each entry's RecordType.
+    const ids = Object.keys(found || {}).filter(key => key !== "SCREEN_POP_DATA");
     if (ids.length !== 1) return null;
-    return { id: ids[0], type: (found[ids[0]] || {}).RecordType || "Contact" };
+    const entry = found[ids[0]] || {};
+    return { id: entry.Id || ids[0], type: entry.RecordType || "" };
   } catch (err) {
-    console.warn("[Vobiz] contact lookup failed:", err && err.message);
+    console.warn("[Vobiz] record lookup failed:", err && err.message);
     return null;
   }
 }
@@ -1170,33 +1135,36 @@ async function findContact(number, inbound) {
  * A Task is what Open CTI's saveLog writes, and what Salesforce's own call
  * logging produces — so these appear in Activity History next to every other
  * logged call rather than somewhere only this app knows about.
+ *
+ * `record` is the match found when the call started, so nothing is looked up
+ * or popped again here.
  */
-async function logCallToCrm({ number, inbound, durationSec, recordingUrl }) {
-  const contact = await findContact(number, inbound);
-
-  const lines = [`Vobiz call ${inbound ? "from" : "to"} ${e164(number)}`];
-  // The recording is a link rather than an attachment: saveLog writes fields,
-  // not files, and a clickable URL on the activity is the most that reaches the
-  // agent without a second API and a stored OAuth token.
-  if (recordingUrl) lines.push(`Recording: ${recordingUrl}`);
+async function logCallToCrm({ number, inbound, durationSec, record }) {
+  const subject = `Vobiz call ${inbound ? "from" : "to"} ${e164(number)}`;
+  // A Contact or Lead is the person on the call (WhoId); an Account, Case or
+  // Opportunity is what the call was about (WhatId). Putting an Account id in
+  // WhoId makes Salesforce reject the whole Task.
+  const related = record && record.id
+    ? (WHO_TYPES.has(record.type) ? { WhoId: record.id } : { WhatId: record.id })
+    : {};
 
   try {
     await openCti("saveLog", {
       value: {
         entityApiName: "Task",
-        Subject: `Vobiz call ${inbound ? "from" : "to"} ${e164(number)}`,
+        Subject: subject,
         CallType: inbound ? "Inbound" : "Outbound",
         CallDurationInSeconds: Math.max(0, Math.round(durationSec || 0)),
-        Description: lines.join(" · "),
+        Description: subject,
         Status: "Completed",
         ActivityDate: new Date().toISOString().slice(0, 10),
         // Left unset when nothing matched, which files the call without a
         // related record rather than dropping it.
-        ...(contact ? { WhoId: contact.id } : {}),
+        ...related,
       },
     });
-    console.info("[Vobiz] logged the call" + (contact ? ` against ${contact.id}` : " with no matching record"));
-    return contact ? contact.id : null;
+    console.info("[Vobiz] logged the call" + (record ? ` against ${record.id}` : " with no matching record"));
+    return record ? record.id : null;
   } catch (err) {
     console.warn("[Vobiz] could not write the call log:", err && err.message);
     return null;
@@ -1221,41 +1189,20 @@ function tryInterface(payload) {
   }
 }
 
-/** Bring the agent to the contact the caller matched. */
-function openContact(contactId) {
-  if (!contactId) return;
-  tryInterface({ id: "contact", value: contactId });
-}
-
 function onTriggerDialer(event) {
   showPanel();
-
-  // Freshworks CRM puts the number on event.data.phoneNumber; Freshdesk hands
-  // it through event.helper.getData().number. Read both, so the panel never
-  // opens empty just because the host worded the payload differently.
-  let number = null;
-  try {
-    number = (event && event.data && event.data.phoneNumber) || null;
-    if (!number && event && typeof event.helper?.getData === "function") {
-      const data = event.helper.getData();
-      number = (data && data.number) || null;
-    }
-  } catch {
-    /* an unreadable payload is not a reason to swallow the click */
-  }
-  placeCall(number);
+  // opencti-host.js delivers Salesforce's click as { phoneNumber, recordId,
+  // objectType }. The record is the one the agent clicked on, so it is used as
+  // the call's record directly — there is nothing to search for or pop.
+  const data = (event && event.data) || {};
+  const number = data.phoneNumber || null;
+  const clicked = data.recordId ? { id: data.recordId, type: data.objectType || "" } : null;
+  placeCall(number, clicked);
 }
 
-/**
- * Open the panel.
- *
- * The id differs by product and is not worth getting wrong: Freshworks CRM's
- * tutorial names `phoneApp`, Freshdesk uses `softphone`, and a wrong id fails
- * silently — the panel simply does not open. Both are attempted; the one the
- * host does not recognise rejects harmlessly.
- */
+/** Open the utility panel, so a click-to-dial never dials invisibly. */
 function showPanel() {
-  for (const id of ["phoneApp", "softphone"]) tryInterface({ id });
+  tryInterface({ id: "softphone" });
 }
 
 function onDialButtonClick() {
@@ -1267,25 +1214,16 @@ function onDialButtonClick() {
 /**
  * Place an outbound call with this browser as the A leg.
  *
- * The obvious design — and what docs/backend-contract.md describes — is to have
- * the backend originate to the customer over the REST API and then bridge this
- * browser in with <Dial><User>. That path is dead: routing *into* a registered
- * WebRTC endpoint is broken platform-side. Vobiz builds an unparseable gateway
- * URI for the B leg and drops its own INVITE:
+ * The browser sends the INVITE itself. Vobiz then fetches the endpoint
+ * application's answer URL, and the backend puts this leg in a conference room
+ * and dials the destination into it over the REST API — see
+ * docs/backend-contract.md → /answer.
  *
- *   ERROR: tr_eval_uri(): invalid uri [user@…-webrtc-3.vobiz.ai:7032;…]
- *   INVITE|blocking gw: …
- *
- * 510 of those in 14 days, across other accounts and Vobiz's own SDK. The caller
- * hears ringback and nothing else, and the dial result reads ring=true with an
- * empty DialBLegUUID.
- *
- * Dialling *out* of a registered endpoint works fine, so this sends the INVITE
- * from here instead. Vobiz then fetches the endpoint application's answer URL,
- * and the backend replies with <Dial><Number> to reach the customer — the same
- * shape Vobiz's own rtc-demo and WebRTC playground use.
+ * `clicked` is the Salesforce record a click-to-dial came from, when there is
+ * one. Without it, the number is looked up (and the match popped) as the call
+ * starts.
  */
-function placeCall(number) {
+function placeCall(number, clicked = null) {
   if (!number) return;
 
   const numEl = document.getElementById("callnum");
@@ -1322,6 +1260,10 @@ function placeCall(number) {
     attachRemoteAudio(session);
     setHangupVisible(true);
 
+    // Started now, not when the call ends, so the record is on screen while the
+    // destination is still ringing.
+    const record = clicked ? Promise.resolve(clicked) : findRecord(number, false);
+
     let startedAt = null;
     session.on("progress", () => { if (numEl) numEl.textContent = `Ringing ${number}…`; });
     session.on("confirmed", () => {
@@ -1344,11 +1286,8 @@ function placeCall(number) {
       setStatus("Ready");
       currentRTCSession = null;
       setHangupVisible(false);
-      logCallToCrm({
-        number,
-        inbound: false,
-        durationSec: startedAt ? (Date.now() - startedAt) / 1000 : 0,
-      });
+      const durationSec = startedAt ? (Date.now() - startedAt) / 1000 : 0;
+      record.then(match => logCallToCrm({ number, inbound: false, durationSec, record: match }));
     });
   } catch (err) {
     console.error("[Vobiz] Could not start the call:", err);

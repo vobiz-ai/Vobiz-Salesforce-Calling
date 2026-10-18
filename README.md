@@ -6,7 +6,8 @@ numbers across the CRM become click-to-dial, the matching record pops on every
 call, and each finished call is logged as a Task — without leaving Salesforce.
 
 Built on **Open CTI**, so there is nothing to package and no review to wait for.
-You host a page; Salesforce frames it.
+You host a page; Salesforce frames it. A reference calling backend that serves
+that page and drives the calls is included in [`backend/`](backend/README.md).
 
 ---
 
@@ -78,26 +79,28 @@ From the [Vobiz Console](https://console.vobiz.ai):
 
 ### 3. A calling backend
 
-**This app holds no Vobiz credentials and cannot place a call by itself.** It
-talks to a small service you run, which holds your Vobiz Auth Token and drives
-the Vobiz REST API.
+**The panel holds no Vobiz credentials and cannot place a call by itself.** It
+talks to a small service you run, which drives the Vobiz REST API and answers
+Vobiz's webhooks.
 
-That service is **not in this repository**. Its complete contract — every
-endpoint, the request and response shapes, and the security requirements — is in
-**[docs/backend-contract.md](docs/backend-contract.md)**. Read it before you
-start: the obvious implementation of the recording endpoint is unsafe, and the
-document explains why.
+**This repository includes one:** [`backend/`](backend/README.md) is a
+dependency-free Node.js server (Node 20.12 or later) that implements the whole
+contract and serves the panel too. Run it as-is to evaluate and demo, and read
+its [production notes](backend/README.md#running-it-in-production) before real
+traffic.
 
-The backend must be reachable:
+To build your own instead — in another language, or inside an existing service —
+implement **[docs/backend-contract.md](docs/backend-contract.md)**: every
+endpoint, the request and response shapes, and the security requirements.
 
-- **from the public internet over HTTPS**, because Vobiz calls its webhooks; and
-- **from the agent's browser**, with CORS configured for the panel's origin.
+Either way the backend must be reachable **from the public internet over
+HTTPS**, because Vobiz calls its webhooks. During development that is a tunnel.
 
 ### 4. Somewhere to host the panel
 
-Four static files and a vendored library. Any HTTPS host will do, but **serving
-them from the calling backend is strongly recommended** — see
-[Host the panel](#3-host-the-panel).
+The reference backend serves it at `/salesforce/softphone.html`, so there is
+nothing extra to host. If you build your own backend, serve `app/` from it —
+see [Host the panel](#3-host-the-panel).
 
 ---
 
@@ -173,7 +176,10 @@ The agent then picks which of the account's numbers outgoing calls present.
    panel registers with the Vobiz registrar over WebSocket  ──▶  Ready
 ```
 
-That is the whole flow. The backend is not contacted at all.
+Signing in contacts no backend at all. Calls still do: Vobiz asks your backend's
+`/answer` webhook what to do with every call the endpoint places, so the
+endpoint must be attached to an Application whose answer URL is your backend —
+see [backend/README.md → SIP direct](backend/README.md#signing-in-with-sip-direct).
 
 Because there is no account session behind it, the caller ID cannot be looked
 up — listing an account's numbers is precisely what endpoint credentials do not
@@ -184,13 +190,12 @@ nothing about the cause.
 
 #### What SIP direct cannot do
 
-Two features need account credentials, so they are unavailable on that tab:
+- **Enable inbound calls** — changing number routing is account-level, so the
+  button needs the Vobiz account tab.
+- **Receive inbound calls on the reference backend**, which offers an incoming
+  caller only to an agent signed in on the Vobiz account tab.
 
-- **Enable inbound calls** — changing number routing is account-level. Inbound
-  still *works* on a number already routed; you just cannot set it up here.
-- **Listing recordings** — calls still record; the list is account-scoped.
-
-Everything else — dialling, ringing, accepting, hanging up, screen-pop, the call
+Everything else — dialling, click-to-dial, screen-pop, recording, the call
 Task — is identical.
 
 ### An outbound call, step by step
@@ -293,12 +298,16 @@ records or reconcile billing.
 turns this on; nothing in Salesforce does it by itself. Clicking one opens the
 panel and dials.
 
-**Screen-pop.** On both directions the panel looks the number up and opens the
-matching record, so the agent lands on the right page while the call is still
-connecting. One match pops automatically; several leave the agent to choose.
+**Screen-pop.** An inbound caller's record opens while the panel is still
+ringing. An outbound call from click-to-dial stays on the record that was
+clicked; a typed number is looked up and its record opened as the call starts.
+One match pops automatically; several leave Salesforce's search results for the
+agent to choose from.
 
 **A call Task.** When a call ends, the panel writes a completed **Task** —
-direction, talk time, and a description, related to the matched record. A Task
+direction, talk time, and a description, related to the matched record: a
+Contact or Lead as the Task's **Name**, anything else (an Account, say) as its
+**Related To**. A Task
 is what Salesforce's own call logging produces, so these appear in Activity
 History next to every other logged call.
 
@@ -316,10 +325,16 @@ rather than showing a telephony error for a CRM problem.
 Full walkthrough with exact menu paths: **[docs/install.md](docs/install.md)**.
 In outline:
 
-### 1. Stand up a calling backend
+### 1. Run the calling backend
 
-Implement [docs/backend-contract.md](docs/backend-contract.md), reachable over
-HTTPS from both Vobiz and the browser.
+```bash
+cp backend/.env.example backend/.env       # set PUBLIC_BASE_URL
+node backend/server.js
+```
+
+[backend/README.md](backend/README.md) has the details, including what it
+creates on your Vobiz account and when. To write your own instead, implement
+[docs/backend-contract.md](docs/backend-contract.md).
 
 ### 2. Trust the host in Salesforce
 
@@ -328,8 +343,9 @@ Salesforce refuses to frame the panel and shows a blank box.
 
 ### 3. Host the panel
 
-Copy `app/` to any HTTPS host. **Serving it from the calling backend is
-strongly recommended**, for two reasons that have both caused real outages:
+The reference backend already serves it, at
+`https://<your backend>/salesforce/softphone.html`. With your own backend,
+**serve `app/` from it too**, for two reasons:
 
 - Salesforce stores only a URL, so **every extra hostname is another thing that
   goes stale independently**. One origin, one thing to keep alive.
@@ -368,9 +384,9 @@ https://calling.example.com/salesforce/softphone.html?org=https://your-org.my.sa
 |---|---|---|---|
 | `org` | **yes** | derived from the framing page | Your My Domain host. Open CTI is served per-org and there is no CDN copy, so the panel must be told where to load the toolkit from. |
 | `agentId` | **yes** | — | Which identity this call centre registers as. **Every agent needs a different value**, or calls ring the wrong person. |
-| `backendUrl` | no | wherever the panel was served from | Only needed when the panel is hosted away from the backend. |
-| `registrarUrl` | no | `wss://registrar.vobiz.ai:5063/` | Leave alone unless Vobiz support says otherwise. |
-| `apiVersion` | no | `64.0` | Open CTI API version. |
+| `backendUrl` | no | wherever the panel was served from | Only needed when the panel is hosted away from the backend. Honoured only when Salesforce frames the panel. |
+| `registrarUrl` | no | `wss://registrar.vobiz.ai:5063/` | Leave alone unless Vobiz support says otherwise. Must be a `wss://` host on `vobiz.ai`. |
+| `apiVersion` | no | `64.0` | Open CTI API version, such as `62.0`. |
 
 **For several agents, create one Call Center definition per agent**, each with a
 different `agentId`, and assign the right users to each.
@@ -429,22 +445,26 @@ VPNs, Docker and similar each add interfaces the browser must enumerate.
 
 ## Running it locally
 
-There is no build step and no framework. The panel is four files plus a vendored
-library.
+There is no build step and no framework.
 
 ```bash
-# anything that serves static files over HTTPS will do
-npx serve app
+cloudflared tunnel --url http://localhost:8080     # note the https:// URL it prints
+cp backend/.env.example backend/.env               # PUBLIC_BASE_URL=<that URL>
+node backend/server.js
+npm test                                           # the test suite, no account needed
 ```
 
-Salesforce will not frame a plain-HTTP origin, so local work needs a tunnel or a
-certificate. Whatever you use must **not** show a browser interstitial: a frame
-cannot suppress one, and Salesforce shows a blank panel instead. ngrok's free
-tier does show one; Cloudflare quick tunnels do not.
+Salesforce will not frame a plain-HTTP origin, and Vobiz cannot reach your
+laptop, so local work needs a tunnel. It must **not** show a browser
+interstitial: a frame cannot suppress one, and Salesforce shows a blank panel
+instead. ngrok's free tier does show one; Cloudflare quick tunnels do not.
 
-Then point a Call Center at the tunnel and hard-refresh Salesforce. Remember
-that a quick tunnel gets a **new URL every restart** — a wildcard Trusted URL
-(`https://*.trycloudflare.com`) saves re-doing step 2 each time.
+Then point a Call Center at
+`https://<tunnel>/salesforce/softphone.html?org=…&agentId=…` and hard-refresh
+Salesforce. A quick tunnel gets a **new URL every restart** — update
+`PUBLIC_BASE_URL`, the adapter URL, and sign in again so the backend re-points
+the agent's Application. A wildcard Trusted URL (`https://*.trycloudflare.com`)
+saves re-doing step 2 each time.
 
 **Editing:** change a file, hard-refresh Salesforce. There is nothing to
 rebuild. Keep the browser console open — every failure mode names itself there,
@@ -462,7 +482,9 @@ and the message is more specific than anything Salesforce shows on screen.
 | `app/style.css` | Styles |
 | `app/lib/jssip.min.js` | Vendored JsSIP browser bundle |
 | `call-center/` | The Call Center definition to import |
-| `docs/backend-contract.md` | **Every endpoint your backend must implement**, and its security requirements |
+| `backend/` | The reference calling backend, which also serves the panel |
+| `tests/` | The test suite (`npm test`): the panel's Open CTI wiring and URL checks, and every backend route against a fake Vobiz API |
+| `docs/backend-contract.md` | **Every endpoint a backend must implement**, and its security requirements |
 | `docs/install.md` | The Salesforce-side walkthrough, with troubleshooting |
 | `docs/architecture.md` | Open CTI, the host adapter, and both call flows in detail |
 | `tools/check-docs.mjs` | The documentation link checker CI runs |
@@ -495,9 +517,11 @@ Worth knowing before you roll it out.
 The panel stores no credentials of its own beyond what an agent explicitly asks
 it to remember, and that stays in their browser on their machine.
 
-Your Vobiz Auth Token belongs to your **backend**, never to the browser. The
-security of this integration is therefore almost entirely the security of your
-backend:
+Your Vobiz Auth Token belongs to your **backend**, never to the browser. On the
+account tab the agent types it once; the backend uses it and keeps it in memory
+only. The security of this integration is therefore almost entirely the
+security of your backend — the reference one meets every requirement below, and
+[backend/README.md](backend/README.md#security) says how:
 [docs/backend-contract.md](docs/backend-contract.md#security-requirements) has
 the checklist, including the endpoints that are easy to implement in a way that
 leaks call recordings. Please read it.

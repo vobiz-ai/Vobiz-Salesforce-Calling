@@ -6,10 +6,10 @@ on:
   pull_request:
     branches: [main]
 
-# There is no build and no test suite — this is four static files and a
-# vendored library. So CI checks the things that do break silently: code that
-# stops parsing, documentation links that rot, and a credential reaching a
-# public repository.
+# There is no build: the panel is four static files and a vendored library,
+# and the reference backend is one dependency-free file. CI runs the test suite
+# and checks the things that break silently: code that stops parsing,
+# documentation links that rot, and a credential reaching a public repository.
 jobs:
   check:
     runs-on: ubuntu-latest
@@ -25,7 +25,11 @@ jobs:
           set -e
           node --check app/opencti-host.js
           node --check app/softphone.js
+          node --check backend/server.js
           node --check tools/check-docs.mjs
+
+      - name: Tests
+        run: npm test
 
       - name: Documentation links resolve
         run: node tools/check-docs.mjs
@@ -36,12 +40,16 @@ jobs:
       - name: No committed credentials
         run: |
           set -e
-          if [ -f .env ] || [ -f app/.env ]; then echo "a .env is committed"; exit 1; fi
+          if [ -f .env ] || [ -f app/.env ] || [ -f backend/.env ]; then echo "a .env is committed"; exit 1; fi
           # The panel must never gain an Auth Token, and the toolkit host check
           # must not be removed — both are the defects this family keeps
           # reproducing. See SECURITY.md.
           if grep -rInE 'VOBIZ_AUTH_TOKEN|authToken *[:=] *["'"'"'][A-Za-z0-9]{8,}' app/ ; then
             echo "an auth token must never be in the panel"; exit 1
+          fi
+          # The backend reads its token from the environment, never from source.
+          if grep -rInE '(VOBIZ_AUTH_TOKEN|authToken) *[:=] *["'"'"'][A-Za-z0-9]{8,}' backend/ ; then
+            echo "a literal auth token is committed in backend/"; exit 1
           fi
           if ! grep -q 'SALESFORCE_HOST' app/opencti-host.js ; then
             echo "the ?org= host check is gone — see SECURITY.md"; exit 1

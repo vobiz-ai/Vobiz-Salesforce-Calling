@@ -36,6 +36,8 @@ together.
 - `app/softphone.js` — sign-in, dialling, call handling, and the CRM lookups at
   the bottom of the file
 - `app/softphone.html`, `app/style.css` — the panel itself
+- `backend/server.js` — the reference calling backend
+- `tests/` — the test suite; `npm test` runs it with no account or network
 
 If you change how the panel talks to a backend, keep
 [docs/backend-contract.md](docs/backend-contract.md) in step. Anyone running
@@ -47,5 +49,6 @@ breaks their install rather than ours.
 1. Say what you changed and how you tested it. For anything touching call flow,
    that means a real call in both directions.
 2. Keep [CHANGELOG.md](CHANGELOG.md) current for anything a user would notice.
-3. CI checks that the JavaScript parses, that documentation links resolve, and
-   that no credential is committed. It runs on every pull request.
+3. Run `npm test`. CI runs it too, and checks that the JavaScript parses, that
+   documentation links resolve, and that no credential is committed, on every
+   pull request.

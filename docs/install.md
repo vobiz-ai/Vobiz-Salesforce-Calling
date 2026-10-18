@@ -3,7 +3,7 @@
 Every step here is in Salesforce Setup. There is nothing to package, upload or
 submit for review — Salesforce stores a URL and frames whatever is at it.
 
-Budget about twenty minutes, assuming the panel is already hosted.
+Budget about twenty minutes, assuming the calling backend is already running.
 
 ---
 
@@ -11,10 +11,9 @@ Budget about twenty minutes, assuming the panel is already hosted.
 
 - **Salesforce** with admin access. Lightning Experience. A Developer Edition
   org is fine for evaluation.
-- **The panel hosted at a public HTTPS URL.** See the README's
-  [Hosting the panel](../README.md#3-host-the-panel) section.
-- **A calling backend**, reachable over HTTPS by both Vobiz and the browser.
-  See [backend-contract.md](backend-contract.md).
+- **The calling backend running at a public HTTPS URL**, serving the panel.
+  The reference one in [`backend/`](../backend/README.md) does both; to build
+  your own, see [backend-contract.md](backend-contract.md).
 
 Have your **My Domain host** to hand — the `https://<something>.my.salesforce.com`
 address. Find it at Setup → **My Domain**. It is not the `lightning.force.com`
@@ -76,6 +75,9 @@ first, under Setup → **Session Settings** → Browser Feature Permissions.
    | `backendUrl` | no | Defaults to wherever the panel is served from. |
    | `apiVersion` | no | Open CTI version, default `64.0`. |
 
+   With the reference backend the URL is
+   `https://<PUBLIC_BASE_URL host>/salesforce/softphone.html?org=…&agentId=…`.
+
 5. **Save.**
 
 > Type a plain `&` between parameters in this field. The `&amp;` in the XML file
@@ -124,7 +126,10 @@ direct** tabs, and numbered steps.
 | A warning page instead of the panel | The host is showing a browser interstitial. ngrok's free tier does this and a frame cannot suppress it — use a host that does not. |
 | **"Salesforce org not known"** | `?org=` is missing from the adapter URL and could not be derived. |
 | **"Not configured"** | `?agentId=` is missing. |
-| **"Cannot reach the calling backend"** | The backend is down, or its CORS does not admit the panel's origin. |
+| **"Sign in below to bring your phone line online."** | Normal before the first sign-in. Sign in on the Vobiz account tab. |
+| **"Cannot reach the calling backend"** | The backend or the tunnel is down, or the panel is hosted on another origin whose CORS does not admit it. |
+| **"Registration failed"** after a tunnel restart | `PUBLIC_BASE_URL` still names the old tunnel. Update it, restart the backend, and sign in again. |
+| A call rings out with "Please sign in to the softphone again" | The backend restarted and forgot the session. Sign in again. |
 | Panel loads, no phone icon | The user is not assigned — step 3. |
 | Call connects, no audio, no mic prompt | Microphone permission — the note in step 1. |
 

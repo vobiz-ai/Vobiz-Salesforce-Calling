@@ -26,9 +26,9 @@ clicks, pop a record, write an activity.
 |---|---|
 | `enableClickToDial` | Phone numbers in Salesforce are not clickable until a softphone asks. Nothing else turns this on. |
 | `onClickToDial` | Receives the click. Registered **inside** the enable callback — registering earlier silently receives nothing. |
-| `searchAndScreenPop` | Finds the record for a number and opens it, in one call. Used on both directions. |
+| `searchAndScreenPop` | Finds the record for a number and opens it, in one call: when an inbound call starts ringing, or when a typed number is dialled. A click-to-dial already carries its record and skips it. |
 | `screenPop` | Opens a specific record by id. |
-| `saveLog` | Writes the finished call as a completed **Task**, which is where Salesforce's own call logging puts it. |
+| `saveLog` | Writes the finished call as a completed **Task**, which is where Salesforce's own call logging puts it — related through `WhoId` for a Contact or Lead, `WhatId` for anything else. |
 | `setSoftphonePanelVisibility` | Opens the panel when a call starts, so click-to-dial does not dial invisibly. |
 
 Every one of these takes a `callback` and returns nothing, so
@@ -36,9 +36,9 @@ Every one of these takes a `callback` and returns nothing, so
 
 ## The host adapter
 
-`app/softphone.js` is the panel itself. It
-expects a Freshworks-shaped `client` object; `app/opencti-host.js` supplies that
-shape backed by Open CTI.
+`app/softphone.js` is the panel itself. It talks to a small `client` object —
+read settings, listen for click-to-dial, show a record — and
+`app/opencti-host.js` supplies that object backed by Open CTI.
 
 ```
   ┌─────────────────────────────────────────┐

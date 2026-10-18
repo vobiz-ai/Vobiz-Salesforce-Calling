@@ -1,19 +1,17 @@
 /** === Salesforce Open CTI host adapter ===
  *
- * The panel this loads alongside is the Freshsales panel, ported across almost
- * unchanged. It reaches its host through an `app`/`client` pair shaped like the
- * Freshworks SDK; this file supplies that same shape backed by Salesforce's
- * Open CTI toolkit instead.
- *
- * Done this way so the two integrations do not drift. Everything hard-won in
- * that panel — the conference bridge, the ICE gathering cap, the
- * placeholder-password gate, releasing a caller's leg on hangup — is telephony,
- * not CRM, and none of it should be reimplemented per platform. A fix made in
- * one ports to the other by copying a function; see tools/port-from-freshsales.mjs.
+ * The panel (softphone.js) reaches its host through a small `app`/`client`
+ * object: read settings, listen for click-to-dial, show a record. This file
+ * supplies that object, backed by Salesforce's Open CTI toolkit.
  *
  * Configuration cannot come from installation settings here. Salesforce stores
  * only an adapter URL and gives it no settings UI, so everything is read from
  * that URL's query string. See README.md → Configuration.
+ *
+ * Every value read from the query string is untrusted: anyone can send an agent
+ * a link to the panel with parameters of their choosing. So each one that names
+ * a place to load code from, send credentials to, or register with is checked
+ * before it is used.
  */
 const PARAMS = new URLSearchParams(window.location.search);
 
@@ -41,9 +39,23 @@ const PARAMS = new URLSearchParams(window.location.search);
  */
 const SALESFORCE_HOST = /^[a-z0-9][a-z0-9.-]*\.(my\.salesforce\.com|salesforce\.com|force\.com|salesforce-setup\.com)$/i;
 
+/**
+ * The Open CTI API version, which becomes part of the toolkit's path.
+ *
+ * Checked as strictly as the host. Unchecked, `apiVersion=../../../x` walks out
+ * of /support/api/ and loads any file from any Salesforce host — including a
+ * file an attacker uploaded to their own free org — which is the same script
+ * execution the host check exists to prevent.
+ */
+const API_VERSION = /^\d{2,3}\.0$/;
+
 function toolkitUrl() {
   const explicit = (PARAMS.get("org") || "").trim().replace(/\/+$/, "");
   const apiVersion = (PARAMS.get("apiVersion") || "64.0").trim();
+  if (!API_VERSION.test(apiVersion)) {
+    console.error(`[Vobiz] refusing apiVersion=${apiVersion} — expected a version such as 64.0`);
+    return null;
+  }
   const path = `/support/api/${apiVersion}/lightning/opencti_min.js`;
 
   if (explicit) {
@@ -121,6 +133,58 @@ async function openCti(method, args = {}) {
   });
 }
 
+/** True when Salesforce is the page framing this panel. */
+function framedBySalesforce() {
+  try {
+    if (window.top === window.self) return false;
+    return SALESFORCE_HOST.test(new URL(document.referrer).hostname);
+  } catch {
+    return false;
+  }
+}
+
+const DEFAULT_REGISTRAR = "wss://registrar.vobiz.ai:5063/";
+/** Vobiz's own registrars only. The SIP password is presented to this host. */
+const VOBIZ_REGISTRAR = /^wss:\/\/[a-z0-9.-]+\.vobiz\.ai(:\d+)?\/?$/i;
+
+/**
+ * Where the agent's Auth Token and SIP password are sent.
+ *
+ * The default — the origin that served this page — needs no checking. An
+ * override does: a link carrying `backendUrl=https://evil.example` would
+ * otherwise collect whatever the agent types into the sign-in form, on a page
+ * that is genuinely yours. So an override is honoured only when Salesforce is
+ * framing the panel, which is the one place an admin-set adapter URL is loaded.
+ */
+function backendUrl() {
+  const own = window.location.origin;
+  const override = (PARAMS.get("backendUrl") || "").trim();
+  if (!override) return own;
+  let origin;
+  try {
+    origin = new URL(override).origin;
+  } catch {
+    console.error(`[Vobiz] ignoring backendUrl=${override} — not a URL`);
+    return own;
+  }
+  if (origin === own) return override;
+  if (!framedBySalesforce()) {
+    console.error(`[Vobiz] ignoring backendUrl=${override} — an override is only honoured inside Salesforce`);
+    return own;
+  }
+  return override;
+}
+
+function registrarUrl() {
+  const value = (PARAMS.get("registrarUrl") || "").trim();
+  if (!value) return DEFAULT_REGISTRAR;
+  if (!VOBIZ_REGISTRAR.test(value)) {
+    console.error(`[Vobiz] ignoring registrarUrl=${value} — it must be a wss:// address on vobiz.ai`);
+    return DEFAULT_REGISTRAR;
+  }
+  return value;
+}
+
 const HOST = {
   iparams: {
     get: async () => ({
@@ -128,9 +192,9 @@ const HOST = {
       // backend in the recommended setup — so the common case needs no
       // parameter at all. Override with ?backendUrl= when hosting the panel
       // somewhere other than the backend.
-      backend_url: PARAMS.get("backendUrl") || window.location.origin,
+      backend_url: backendUrl(),
       agent_id: PARAMS.get("agentId") || "",
-      registrar_url: PARAMS.get("registrarUrl") || "wss://registrar.vobiz.ai:5063/",
+      registrar_url: registrarUrl(),
     }),
   },
 
@@ -190,14 +254,12 @@ const HOST = {
     },
   },
 
-  // Deliberately absent: request.invokeTemplate. Freshworks proxies CRM writes
-  // through templates declared in an app manifest; Salesforce has no equivalent,
-  // and the panel's CRM functions are replaced with Open CTI ones rather than
-  // shimmed. Anything still reaching for this is a porting mistake and should
-  // say so loudly rather than fail quietly at runtime.
+  // CRM writes go through Open CTI directly (see the bottom of softphone.js),
+  // so the host offers no request proxy. Anything reaching for one should fail
+  // loudly rather than quietly at runtime.
   request: {
     invokeTemplate() {
-      return Promise.reject(new Error("request templates are Freshworks-only — use Open CTI here"));
+      return Promise.reject(new Error("no request proxy here — use Open CTI"));
     },
   },
 };

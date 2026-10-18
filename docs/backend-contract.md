@@ -7,9 +7,10 @@ account credentials and drives the [Vobiz REST API](https://www.vobiz.ai/docs).
 This document is the complete contract. Implement these endpoints and the app
 works; nothing else is required of you.
 
-> **The backend is not included in this repository.** It is a separate service.
-> If you are building one, read the [security requirements](#security-requirements)
-> first — the obvious implementation is unsafe.
+> **A reference implementation is included:** [`backend/`](../backend/README.md).
+> Run it as-is, or read it alongside this document. If you are building your
+> own, read the [security requirements](#security-requirements) first — the
+> obvious implementation is unsafe.
 
 ## Why a backend exists at all
 
@@ -18,27 +19,38 @@ Two reasons, both non-negotiable:
 1. **Vobiz Auth Tokens are account-level API credentials.** Vobiz's own
    documentation says never to expose `X-Auth-Token` in client-side code. The
    backend holds the token and the browser never sees it.
-2. **A `<audio>` element cannot send authentication headers.** Call recordings
-   are protected, so playback needs a server-side step. See
-   [recordings](#get-recording-audioagentidrecordingid) for the right way to do
-   this — a plain proxy is the wrong answer.
+2. **Vobiz needs someone to ask.** Every call the panel places, and every call
+   to your number, fetches an answer URL for its VobizXML. That has to be a
+   public HTTPS server.
 
 ## Base URL
 
-Everything below is relative to the `backend_url` installation parameter. The
-app requires HTTPS and strips trailing slashes.
+Everything below is relative to the origin that served the panel, or to the
+adapter URL's `?backendUrl=` when the panel is hosted elsewhere. The app
+requires HTTPS (plain `http://localhost` is allowed for development) and strips
+trailing slashes.
+
+The panel sends no authentication header of its own. Its requests are ordinary
+`fetch` calls with the browser's default credentials mode, so **a cookie your
+backend sets at `/login` is sent back on every same-origin request** — which is
+how the reference backend authenticates them. See
+[security requirements](#security-requirements).
 
 ## Endpoints the browser calls
 
 ### `GET /agent/{agentId}`
 
-Returns the SIP identity this panel registers as.
+Returns the SIP identity this panel registers as. Called on load, and again
+right after `/login`.
 
 ```json
-{ "displayName": "Priya S", "sipUser": "priya@registrar.vobiz.ai", "sipPassword": "..." }
+{ "displayName": "Priya S", "sipUser": "priya@registrar.vobiz.ai", "sipPassword": "...", "provisioned": true }
 ```
 
 `sipUser` must be a full `user@domain` — the app builds `sip:${sipUser}`.
+
+Before the agent has signed in, return `{ "provisioned": false }` with no
+password. The panel then shows "Sign in below" instead of trying to register.
 
 > **Do not serve a long-lived SIP password from an unauthenticated endpoint.**
 > See [security requirements](#security-requirements).
@@ -77,36 +89,10 @@ On failure return a non-2xx status with `{ "error": "..." }`.
 
 → `{ "selected": "+919876543211" }`
 
-### `POST /start-call` — *no longer used for outbound*
-
-The panel does **not** ask the backend to originate outbound calls any more. It
-sends the SIP INVITE itself, so the browser is the **A leg**, and your `/answer`
-handler decides what happens next — see [`/answer`](#getpost-answer).
-
-The previous design — backend originates to the customer over the REST API, then
-bridges the browser in with `<Dial><User>` — does not work: a call cannot be
-delivered into a registered WebRTC endpoint. The browser places every call, and
-your `/answer` handler decides what happens next.
-
-Keep the route if you want a server-originated fallback (for ringing an agent's
-mobile, say). Its shape is unchanged:
-
-```json
-{ "to": "+919876543210", "agentId": "priya", "platform": "freshsales" }
-```
-
-→ `{ "request_uuid": "..." }`
-
-### `GET /call-status/{callUuid}?agentId={agentId}`
-
-→ `{ "active": true }`
-
-Polled every 3 seconds while a call is up.
-
 ### `POST /setup-inbound`
 
 ```json
-{ "agentId": "priya" }
+{ "agentId": "priya", "platform": "salesforce" }
 ```
 
 → `{ "number": "+919876543210" }`
@@ -199,25 +185,6 @@ gone and the delete returns `404` — treat that as success.
 > this point, which is why it sends it. Prefer the value it sends over your own
 > state.
 
-### `GET /recordings/{agentId}?limit=15`
-
-```json
-{ "objects": [ { "recording_id": "...", "add_time": "2026-09-14 10:30:00", "rounded_recording_duration": 42 } ] }
-```
-
-### `GET /recording-audio/{agentId}/{recordingId}`
-
-Returns playable audio. The app assigns this URL directly to an `<audio>`
-element, so **it cannot carry an `Authorization` header.**
-
-**Do not solve this with an open proxy.** An endpoint that streams any
-recording to anyone who knows the URL is a data breach waiting to happen, and
-the listing endpoint above hands out the IDs. Instead:
-
-- have `/recordings` return **signed, short-lived URLs** (a few minutes) that
-  encode the recording ID and an expiry, and
-- verify that signature on every request here.
-
 ## Endpoints Vobiz calls
 
 These are webhooks. Vobiz must reach them over public HTTPS.
@@ -229,7 +196,11 @@ One handler serves both directions. Pick by looking at who the call is *from*:
 - `From` starts with `sip:` (or `RouteType=sip`) → the **browser dialled out**.
 - `From` is a plain number → a **PSTN caller** reached your DID.
 
-When the browser is the A leg, check first whether a join is expected for this
+**Check that the SIP user on the call is this agent's own endpoint** before
+doing anything that costs money. `/answer` is a public URL; without this check,
+anyone who can POST to it can have your backend dial any number on your bill.
+
+When the browser is the A leg, check next whether a join is expected for this
 agent (set by `/inbound-accept`). If one is, this leg is the agent coming to
 meet a waiting caller — **not** a new outbound call:
 
@@ -382,18 +353,34 @@ attribute expresses it without also capping the conversation.
 The app sends `agentId` as a plain string in the path, body, or query. **If your
 backend trusts that string, every endpoint above is unauthenticated and the
 `agentId` is guessable.** An attacker who learns your backend URL could then
-read SIP passwords, place calls billed to your account, rewrite your inbound
-number routing, and download every call recording.
+read SIP passwords, place calls billed to your account, and rewrite your
+inbound number routing.
 
 A backend implementing this contract must therefore:
 
 - [ ] **Authenticate every request.** Do not treat `agentId` as proof of
-      identity. Issue a per-agent token at login and require it.
-- [ ] **Not serve long-lived SIP passwords.** Mint short-lived credentials, or
-      gate `/agent/{agentId}` behind the same authentication.
-- [ ] **Sign recording URLs** with a short expiry, as described above.
-- [ ] **Scope CORS to the Salesforce origin.** Never `Access-Control-Allow-Origin: *`.
-- [ ] **Store Auth Tokens encrypted at rest**, and never log them.
-- [ ] **Serve over HTTPS** with a stable hostname.
+      identity. Set a session at `/login` and require it, matched to the
+      `agentId` in the request. The panel sends no header of its own, so use an
+      `HttpOnly; Secure; SameSite=None; Partitioned` cookie — the panel runs in
+      a frame inside Salesforce, where any other cookie is dropped as
+      third-party — and serve the panel from the backend so the cookie is
+      same-origin.
+- [ ] **Not serve SIP passwords without that session.** `/agent/{agentId}`
+      answers `{ "provisioned": false }` to anyone else.
+- [ ] **Refuse cross-site requests.** Accept only `application/json` bodies
+      (which forces a CORS preflight) and answer no preflight from other
+      origins. Never `Access-Control-Allow-Origin: *`. If the panel is hosted
+      on a different origin, allow exactly that origin — it is the panel's
+      origin that makes the requests, not Salesforce's.
+- [ ] **Dial only for the agent's own endpoint** on `/answer`, as above, and
+      verify `X-Vobiz-Signature-V3` on webhooks when Vobiz sends it.
+- [ ] **Not proxy call recordings.** An endpoint that streams any recording to
+      anyone who knows its id is a data breach. Play them in the Vobiz Console,
+      or sign short-lived URLs.
+- [ ] **Store Auth Tokens encrypted at rest**, if you store them at all, and
+      never log them.
+- [ ] **Serve over HTTPS** with a stable hostname, and send
+      `Content-Security-Policy: frame-ancestors` limited to Salesforce on the
+      panel's pages.
 
 If you are adapting a prototype, assume it does none of these.
