@@ -146,7 +146,7 @@ A caller waiting:
 ```json
 {
   "pending": true,
-  "room": "zh<call-uuid-without-punctuation>",
+  "room": "in<call-uuid-without-punctuation>",
   "from": "910000000098",
   "to": "+910000000002",
   "callUuid": "..."
@@ -164,7 +164,7 @@ A caller waiting:
 { "agentId": "priya" }
 ```
 
-→ `{ "ok": true, "room": "zh...", "from": "910000000098", "callUuid": "..." }`
+→ `{ "ok": true, "room": "in...", "from": "910000000098", "callUuid": "..." }`
 
 Stop the no-answer timer **here**, before the browser's leg arrives — a slow
 join otherwise races the caller into voicemail. Record that a join is now
@@ -363,7 +363,7 @@ Otherwise park the caller in a room of their own and follow it with voicemail:
               endConferenceOnExit="true"
               waitSound="https://you.example.com/conf-wait"
               timeLimit="3600"
-              callbackUrl="https://you.example.com/conf-event?room=ROOM&amp;role=agent"
+              callbackUrl="https://you.example.com/conf-event?room=ROOM&amp;role=caller"
               callbackMethod="POST">ROOM</Conference>
   <!-- reached only if the room ends before an agent joins -->
   <Speak>Sorry, nobody is available. Please leave a message after the beep.</Speak>

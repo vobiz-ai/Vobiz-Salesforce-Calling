@@ -50,7 +50,7 @@ that connects with no audio and no permission prompt.
 
 On the same Trusted URL, scroll to **Permissions Policy Directives** and tick
 **microphone**. If it is greyed out, set **Microphone** to *Trusted URLs Only*
-first, under Setup → **Session Settings** → Browser Feature Permissions.
+first, under Setup → **Session Settings** → **Browser Feature Permissions**.
 
 ---
 
@@ -79,6 +79,10 @@ first, under Setup → **Session Settings** → Browser Feature Permissions.
    `https://<PUBLIC_BASE_URL host>/salesforce/softphone.html?org=…&agentId=…`.
 
 5. **Save.**
+
+> **One Call Center per agent.** Salesforce stores one adapter URL per Call
+> Center, so for each extra agent import a copy of the definition with a
+> different InternalName, Display Name and `agentId`, and assign that agent to it.
 
 > Type a plain `&` between parameters in this field. The `&amp;` in the XML file
 > is only because XML requires it.
@@ -125,11 +129,11 @@ direct** tabs, and numbered steps.
 | **`frame-ancestors 'none'`** in the console | The adapter URL points at a Salesforce page rather than the panel. |
 | A warning page instead of the panel | The host is showing a browser interstitial. ngrok's free tier does this and a frame cannot suppress it — use a host that does not. |
 | **"Salesforce org not known"** | `?org=` is missing from the adapter URL and could not be derived. |
-| **"Not configured"** | `?agentId=` is missing. |
+| **"Not configured"** | `&agentId=` is missing. |
 | **"Sign in below to bring your phone line online."** | Normal before the first sign-in. Sign in on the Vobiz account tab. |
-| **"Cannot reach the calling backend"** | The backend or the tunnel is down, or the panel is hosted on another origin whose CORS does not admit it. |
-| **"Registration failed"** after a tunnel restart | `PUBLIC_BASE_URL` still names the old tunnel. Update it, restart the backend, and sign in again. |
-| A call rings out with "Please sign in to the softphone again" | The backend restarted and forgot the session. Sign in again. |
+| **"Cannot reach the calling backend"** | The backend is down, or `backendUrl` points at another origin. With the included backend, leave `backendUrl` unset. |
+| The backend's address changed | Update `PUBLIC_BASE_URL`, the adapter URL and the Trusted URL, restart the backend, and sign in again. |
+| A call ends with "Please sign in to the softphone again" | The backend restarted or the session expired. Sign in again. |
 | Panel loads, no phone icon | The user is not assigned — step 3. |
 | Call connects, no audio, no mic prompt | Microphone permission — the note in step 1. |
 
