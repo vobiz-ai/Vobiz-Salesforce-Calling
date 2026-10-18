@@ -47,10 +47,15 @@ jobs:
           if grep -rInE 'VOBIZ_AUTH_TOKEN|authToken *[:=] *["'"'"'][A-Za-z0-9]{8,}' app/ ; then
             echo "an auth token must never be in the panel"; exit 1
           fi
-          # The backend reads its token from the environment, never from source.
+          # The backend holds no Vobiz account of its own: tokens arrive from
+          # the agent's sign-in and live in memory, never in source or env.
           if grep -rInE '(VOBIZ_AUTH_TOKEN|authToken) *[:=] *["'"'"'][A-Za-z0-9]{8,}' backend/ ; then
             echo "a literal auth token is committed in backend/"; exit 1
           fi
+          if grep -rInE 'VOBIZ_(AUTH_ID|AUTH_TOKEN|FROM_NUMBER|SIP_USER|SIP_PASSWORD)|SIP_DIRECT_USERNAMES' backend/ app/ ; then
+            echo "account credentials must not come from the environment"; exit 1
+          fi
+          if git ls-files | grep -q '^backend/data/' ; then echo "backend/data is committed"; exit 1; fi
           if ! grep -q 'SALESFORCE_HOST' app/opencti-host.js ; then
             echo "the ?org= host check is gone — see SECURITY.md"; exit 1
           fi

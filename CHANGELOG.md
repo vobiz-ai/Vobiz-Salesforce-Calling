@@ -3,6 +3,26 @@
 Notable changes to this app. This project follows
 [Semantic Versioning](https://semver.org/).
 
+## [Unreleased]
+
+### Changed
+- **Any Vobiz account can sign in.** The reference backend has no account of
+  its own: `VOBIZ_AUTH_ID`, `VOBIZ_AUTH_TOKEN` and `SIP_DIRECT_USERNAMES` are
+  gone. Several accounts can be signed in at once; sessions, endpoints and
+  call routing are keyed by account and agent together.
+- Provisioning is one `VobizSF` application per account, found by answer URL
+  (never repointing anyone else's), and one endpoint per agent, recorded in
+  `backend/data/endpoints.json` (ids and usernames only) and bound with a
+  string `app_id`, verified by reading it back. 17-digit ids are never turned
+  into JavaScript numbers.
+- Inbound calls are routed by the webhook's `ParentAuthID`, or the dialled
+  number, and ring every open panel of that account.
+- The caller ID dropdown lists every page of the account's active,
+  voice-enabled numbers and shows the application each is on.
+- **SIP direct** works with no backend credentials: outbound by `<Dial>`,
+  inbound by `<Dial><User>` to the endpoint, once the endpoint and number are
+  attached to an application pointing at the backend.
+
 ## [1.1.0]
 
 ### Added

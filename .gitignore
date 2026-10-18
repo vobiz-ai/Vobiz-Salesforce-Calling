@@ -11,3 +11,6 @@ node_modules/
 .idea/
 .vscode/
 *.log
+
+# Endpoint map written by the reference backend (ids and usernames only)
+backend/data/
